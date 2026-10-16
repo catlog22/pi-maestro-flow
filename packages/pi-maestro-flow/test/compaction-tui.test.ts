@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,12 +9,128 @@ import {
   registerCompactionSettingsCommand,
   type CompactionSettingsResult,
 } from "../src/tui/compaction-settings.ts";
-import type { CompactionScope } from "../src/compaction/compaction-settings.ts";
+import {
+  readEffectiveCompactionSettings,
+  resolveProjectSettingsPath,
+  resolveUserSettingsPath,
+  type CompactionScope,
+} from "../src/compaction/compaction-settings.ts";
 
 const theme = {
   fg(_role: string, text: string) { return text; },
   bold(text: string) { return text; },
 };
+
+test("compaction TUI retains summary tuning in drafts, equality, and scope saves", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    snapshot: {
+      scopes: {
+        user: { summary: { thinkingLevel: "high", timeoutMs: 120_000 } },
+        project: { summary: { timeoutMs: 60_000 } },
+      },
+      effective: {} as never,
+    },
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  overlay.handleInput("\x13");
+  assert.doesNotMatch(overlay.render(120).join("\n"), /确认保存/, "cloned summary groups must not create dirty drafts");
+  for (let index = 0; index < 9; index++) overlay.handleInput("\x1b[B");
+  assert.match(overlay.render(120).join("\n"), /独立摘要 · 思考 high · 超时 60000 ms · 项目/);
+  for (let width = 1; width <= 120; width++) {
+    for (const line of overlay.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `summary details exceed width ${width}: ${line}`);
+    }
+  }
+  for (let index = 0; index < 8; index++) overlay.handleInput("\x1b[A");
+  overlay.handleInput(" "); // project enabled
+  overlay.handleInput("\t");
+  overlay.handleInput(" "); // user enabled
+  overlay.handleInput("\x13");
+  overlay.handleInput("\r");
+  await flushAsync();
+  assert.deepEqual(saves, [
+    { scope: "user", values: { enabled: true, summary: { thinkingLevel: "high", timeoutMs: 120_000 } } },
+    { scope: "project", values: { enabled: false, summary: { timeoutMs: 60_000 } } },
+  ]);
+});
+
+test("/maestro-compaction headless summary parsing, persistence, and unset preserve other settings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-compaction-summary-command-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const agent = join(root, "agent");
+  const project = join(root, "project");
+  process.env.PI_CODING_AGENT_DIR = agent;
+  try {
+    await mkdir(agent, { recursive: true });
+    await mkdir(join(project, ".pi"), { recursive: true });
+    const unrelated = { model: "p/m", newContext: { enabled: false }, soft: { enabled: false } };
+    await writeFile(resolveProjectSettingsPath(project), JSON.stringify({
+      theme: "night", compaction: { ...unrelated, summary: { vendor: "keep" } },
+    }));
+    let command: { handler(args: string, ctx: any): Promise<void> | void } | undefined;
+    registerCompactionSettingsCommand({
+      registerCommand(name: string, value: typeof command) {
+        if (name === "maestro-compaction") command = value;
+      },
+    } as never);
+    assert.ok(command);
+    let reloads = 0;
+    const notices: string[] = [];
+    const ctx = {
+      cwd: project,
+      hasUI: false,
+      model: { contextWindow: 300_000, maxTokens: 16_000 },
+      async reload() { reloads++; },
+      ui: { notify(message: string) { notices.push(message); } },
+    };
+    await command.handler(`set --scope=user --summary='{"thinkingLevel":"high","timeoutMs":120000}'`, ctx);
+    assert.equal(reloads, 1);
+    assert.deepEqual(JSON.parse(await readFile(resolveUserSettingsPath(), "utf8")), {
+      compaction: { summary: { thinkingLevel: "high", timeoutMs: 120_000 } },
+    });
+    await command.handler(`set --summary='{"timeoutMs":60000}'`, ctx);
+    assert.equal(reloads, 2);
+    assert.deepEqual(readEffectiveCompactionSettings(project).summary, { thinkingLevel: "high", timeoutMs: 60_000 });
+    const beforeInvalid = await readFile(resolveProjectSettingsPath(project), "utf8");
+    for (const [raw, error] of [
+      ["{broken", /JSON object/],
+      ["null", /JSON object/],
+      ["[]", /JSON object/],
+      ["false", /JSON object/],
+      ['{"thinkingLevel":"invalid"}', /summary.thinkingLevel/],
+      ['{"timeoutMs":0}', /summary.timeoutMs/],
+      ['{"timeoutMs":1.5}', /summary.timeoutMs/],
+      ['{"timeoutMs":2147483648}', /summary.timeoutMs/],
+      ['{"timeoutMs":"1000"}', /summary.timeoutMs/],
+    ] as const) {
+      await command.handler(`set --summary='${raw}'`, ctx);
+      assert.match(notices.at(-1) ?? "", error);
+      assert.equal(reloads, 2, "invalid patches must neither write nor reload");
+      assert.equal(await readFile(resolveProjectSettingsPath(project), "utf8"), beforeInvalid);
+    }
+    await command.handler(`set --summary '{"thinkingLevel":"off"}'`, ctx);
+    assert.equal(reloads, 3);
+    assert.deepEqual(JSON.parse(await readFile(resolveProjectSettingsPath(project), "utf8")), {
+      theme: "night", compaction: { ...unrelated, summary: { vendor: "keep", thinkingLevel: "off", timeoutMs: 60_000 } },
+    });
+    await command.handler("show", ctx);
+    assert.deepEqual(JSON.parse(notices.at(-1)!).effective.summary, { thinkingLevel: "off", timeoutMs: 60_000 });
+    await command.handler("unset summary", ctx);
+    assert.equal(reloads, 4);
+    assert.deepEqual(JSON.parse(await readFile(resolveProjectSettingsPath(project), "utf8")), {
+      theme: "night", compaction: { ...unrelated, summary: { vendor: "keep" } },
+    });
+    assert.deepEqual(readEffectiveCompactionSettings(project).summary, { thinkingLevel: "high", timeoutMs: 120_000 });
+    await command.handler("unset summary --scope=user", ctx);
+    assert.equal(reloads, 5);
+    assert.deepEqual(readEffectiveCompactionSettings(project).summary, { thinkingLevel: "off", timeoutMs: 240_000 });
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("compaction TUI renders safely at narrow, boundary, and wide widths", () => {
   const overlay = createOverlay();

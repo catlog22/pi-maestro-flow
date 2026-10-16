@@ -33,6 +33,10 @@ test("model catalog is deterministic, deduplicated, and replaceable", () => {
     { provider: "openai", id: "gpt-5", reasoning: true },
   ]);
   assert.deepEqual(first.modelIds, ["anthropic/claude-opus", "openai/gpt-5"]);
+  assert.match(first.systemPrompt, /Available authenticated models/);
+  assert.match(first.systemPrompt, /follow the `teammate` tool description and any currently enabled smart-selection guidance/);
+  assert.match(first.systemPrompt, /fails fast at dispatch with "Unknown teammate model specifier"/);
+  assert.doesNotMatch(first.systemPrompt, /inherits|falls back|per-task wins|Omit `model`/);
 
   const injected = appendModelCatalog("base", first);
   assert.match(injected, /anthropic\/claude-opus/);
@@ -43,6 +47,7 @@ test("model catalog is deterministic, deduplicated, and replaceable", () => {
   assert.match(refreshed, /google\/gemini-pro/);
   assert.doesNotMatch(refreshed, /openai\/gpt-5/);
   assert.equal((refreshed.match(/<available_teammate_models>/g) ?? []).length, 1);
+  assert.equal(appendModelCatalog(refreshed, second), refreshed);
 });
 
 test("model catalog advertises the full thinking range for reasoning models", () => {

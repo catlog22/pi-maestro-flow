@@ -34,6 +34,7 @@ icon: "🧮"
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "model": "provider/compaction-model",
+    "summary": { "thinkingLevel": "off", "timeoutMs": 240000 },
     "newContext": { "enabled": true },
     "soft": {
       "enabled": true,
@@ -59,7 +60,22 @@ icon: "🧮"
 | `reserveTokens` | `16384` | 为模型响应预留的 Token |
 | `keepRecentTokens` | `20000` | 始终保留的近期对话 Token |
 | `model` | 跟随会话模型 | 压缩摘要模型（`provider/id`） |
+| `summary.thinkingLevel` | `off` | 独立摘要思考深度，按摘要模型能力 clamp |
+| `summary.timeoutMs` | `240000` | 摘要调用与重试退避共享的超时预算（毫秒） |
 | `newContext.enabled` | `true` | 启用显式、无模型摘要的同会话上下文重置 |
+
+### 摘要优化、进度与指标（v0.34.0）
+
+摘要请求独立于主会话 thinking，默认 `off`；可选 `off/minimal/low/medium/high/xhigh/max`，实际级别按摘要模型能力调整。`summary` 按字段合并 project-over-user 配置；`/maestro-compaction` 模型详情显示生效值与来源，也可用 JSON 设置：
+
+```bash
+/maestro-compaction set --scope=project --summary='{"thinkingLevel":"off","timeoutMs":240000}'
+```
+
+- 摘要输入按模型窗口与输出预算拟合；prompt-too-long 时减少历史后重试，瞬时 provider/transport 错误保留输入重试，两类预算独立（各最多 2 次外层重试）。确定性错误不盲重试。
+- 默认总预算为 240 秒，覆盖 provider attempts 和退避，不是每次重试重新计时；取消后若 provider 尚未结算，进度会明确显示等待结算，不把超时当成 provider 已停止。
+- 实时状态显示估算输入、输出上限、思考级别、attempts、耗时与请求/退避阶段；成功 checkpoint 记录模型、重试尝试数、丢弃轮数及耗时，provider 有 usage 时再记录实际输入/输出 Token，不把估算冒充实测。
+- 摘要模型不可用、认证失效或窗口不足时按既有边界回退当前会话模型；本优化不替代无模型摘要的 `new_context`，也不承诺固定压缩耗时。
 
 ### 软压缩字段（多准则决策）
 

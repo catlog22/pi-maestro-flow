@@ -98,12 +98,14 @@ export declare function barrierWait(entries: BarrierEntry[], mode: MonitorWaitMo
 export declare function formatBarrierCompact(settled: BarrierSettled[], exitReason: string, durationMs: number): string[];
 export declare function validateMonitorParams(params: MonitorParams): string | undefined;
 /** The new `monitor` tool is deliberately narrower than the provider-level `observe` tool. */
-export type MonitorQueryAction = "list" | "get" | "wait";
+export type MonitorQueryAction = "list" | "get" | "wait" | "subscribe" | "unsubscribe" | "subscriptions";
 export type MonitorQueryDetail = "summary" | "full";
 export type MonitorQueryUntil = "change" | "attention" | "settled";
 export interface MonitorQueryParams {
     action: MonitorQueryAction;
     target?: string;
+    events?: readonly import("./monitor-window-subscriptions.ts").MonitorWindowEventKind[];
+    subscriptionId?: string;
     detail?: MonitorQueryDetail;
     cursor?: string;
     until?: MonitorQueryUntil;
@@ -132,6 +134,12 @@ export interface MonitorQueryTargetSnapshot {
     target: string;
     aliases?: readonly string[];
     identity: MonitorWindowIdentityV1;
+    sessionId?: string;
+    sourceId?: string;
+    generation?: number;
+    /** Stable root lifecycle sequence, not heartbeat/content revision. */
+    runningRevision?: string;
+    settlementRevision?: string;
     timeline?: readonly MonitorQueryTimelineGroup[];
 }
 export interface MonitorQuerySnapshot {
@@ -182,6 +190,7 @@ export interface MonitorQueryResult {
     windows: readonly MonitorQueryWindow[];
     attention: readonly MonitorWindowAttentionV1[];
     reason?: string;
+    subscriptions?: readonly import("./monitor-window-subscriptions.ts").MonitorWindowSubscription[];
 }
 export declare const MONITOR_QUERY_DEFAULT_TIMEOUT_MS: number;
 /** Node clamps larger one-shot timer delays to 1ms. */
@@ -201,3 +210,5 @@ export declare function revalidateMonitorRemoteWindowCaptures(observations: read
 export declare function runMonitorQuery(params: MonitorQueryParams, dependencies: MonitorQueryDependencies, signal: AbortSignal): Promise<MonitorQueryResult>;
 /** Compact model-facing rendering; list never includes per-window timeline content. */
 export declare function formatMonitorQueryResult(result: MonitorQueryResult): string[];
+export declare function windowForTarget(snapshot: MonitorQuerySnapshot, target: MonitorQueryTargetSnapshot, full: boolean): MonitorQueryWindow | undefined;
+export declare function sameMonitorIdentity(left: MonitorWindowIdentityV1, right: MonitorWindowIdentityV1): boolean;

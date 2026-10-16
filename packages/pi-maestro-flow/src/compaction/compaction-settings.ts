@@ -12,6 +12,22 @@ export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const DEFAULT_NEW_CONTEXT_ENABLED = true;
 
+export const SUMMARY_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type SummaryThinkingLevel = typeof SUMMARY_THINKING_LEVELS[number];
+export const DEFAULT_SUMMARY_THINKING_LEVEL: SummaryThinkingLevel = "off";
+export const DEFAULT_SUMMARY_TIMEOUT_MS = 240_000;
+const MAX_SUMMARY_TIMEOUT_MS = 2_147_483_647;
+
+export interface SummaryCompactionConfigPatch {
+  thinkingLevel?: SummaryThinkingLevel;
+  timeoutMs?: number;
+}
+
+export interface SummaryCompactionSettings {
+  thinkingLevel: SummaryThinkingLevel;
+  timeoutMs: number;
+}
+
 /**
  * Absolute upper bound for `reserveTokens`, applied at load time where the
  * model context window is unknown. `evaluate()` disables all context
@@ -209,9 +225,11 @@ export interface CompactionConfigPatch {
   payloadLimitBytes?: number;
   soft?: SoftCompactionConfigPatch;
   newContext?: NewContextCompactionConfigPatch;
+  /** Standalone summary request tuning, independent of the active session's thinking level. */
+  summary?: SummaryCompactionConfigPatch;
 }
 
-export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens", "model", "newContext", "payloadLimitBytes"] as const;
+export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens", "model", "newContext", "summary", "payloadLimitBytes"] as const;
 
 export type CompactionSettingSource = "project" | "user" | "default";
 
@@ -228,6 +246,7 @@ export interface EffectiveCompactionSettings {
   soft: SoftCompactionSettings;
   /** Explicit new-context mode gate; defaults on and never affects automatic compaction. */
   newContext: NewContextCompactionSettings;
+  summary: SummaryCompactionSettings;
   source: Record<keyof CompactionConfigPatch, CompactionSettingSource>;
 }
 
@@ -282,10 +301,40 @@ function readRawCompaction(path: string): CompactionConfigPatch {
     if (soft) patch.soft = soft;
     const newContext = readRawNewContext(c.newContext);
     if (newContext) patch.newContext = newContext;
+    const summary = readRawSummary(c.summary);
+    if (summary) patch.summary = summary;
     return patch;
   } catch {
     return {};
   }
+}
+
+function isSummaryThinkingLevel(value: unknown): value is SummaryThinkingLevel {
+  return typeof value === "string" && (SUMMARY_THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+function isSummaryTimeout(value: unknown): value is number {
+  return positiveInt(value) !== undefined && (value as number) <= MAX_SUMMARY_TIMEOUT_MS;
+}
+
+function readRawSummary(value: unknown): SummaryCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const summary: SummaryCompactionConfigPatch = {};
+  if (isSummaryThinkingLevel(value.thinkingLevel)) summary.thinkingLevel = value.thinkingLevel;
+  if (isSummaryTimeout(value.timeoutMs)) summary.timeoutMs = value.timeoutMs;
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function validateSummary(value: unknown): string[] {
+  if (!isRecord(value)) return ["summary must be an object"];
+  const errors: string[] = [];
+  if (value.thinkingLevel !== undefined && !isSummaryThinkingLevel(value.thinkingLevel)) {
+    errors.push(`summary.thinkingLevel must be one of ${SUMMARY_THINKING_LEVELS.join(", ")}`);
+  }
+  if (value.timeoutMs !== undefined && !isSummaryTimeout(value.timeoutMs)) {
+    errors.push(`summary.timeoutMs must be a positive safe integer <= ${MAX_SUMMARY_TIMEOUT_MS}`);
+  }
+  return errors;
 }
 
 function readRawNewContext(value: unknown): NewContextCompactionConfigPatch | undefined {
@@ -428,6 +477,7 @@ export function resolveEffectiveCompactionSettings(
     modelThresholds: "default",
     soft: "default",
     newContext: "default",
+    summary: "default",
     payloadLimitBytes: "default",
   };
 
@@ -439,6 +489,10 @@ export function resolveEffectiveCompactionSettings(
   let payloadLimitBytes: number | undefined;
   const soft: SoftCompactionSettings = createDefaultSoftCompaction();
   const newContext: NewContextCompactionSettings = { enabled: DEFAULT_NEW_CONTEXT_ENABLED };
+  const summary: SummaryCompactionSettings = {
+    thinkingLevel: DEFAULT_SUMMARY_THINKING_LEVEL,
+    timeoutMs: DEFAULT_SUMMARY_TIMEOUT_MS,
+  };
 
   for (const [patch, src] of [[userPatch, "user"], [projectPatch, "project"]] as const) {
     if (patch.enabled !== undefined) { enabled = patch.enabled; source.enabled = src; }
@@ -450,6 +504,14 @@ export function resolveEffectiveCompactionSettings(
     if (patch.newContext?.enabled !== undefined) {
       newContext.enabled = patch.newContext.enabled;
       source.newContext = src;
+    }
+    if (patch.summary?.thinkingLevel !== undefined) {
+      summary.thinkingLevel = patch.summary.thinkingLevel;
+      source.summary = src;
+    }
+    if (patch.summary?.timeoutMs !== undefined) {
+      summary.timeoutMs = patch.summary.timeoutMs;
+      source.summary = src;
     }
     if (patch.soft !== undefined) {
       if (patch.soft.enabled !== undefined) soft.enabled = patch.soft.enabled;
@@ -492,7 +554,7 @@ export function resolveEffectiveCompactionSettings(
     }
   }
 
-  return { enabled, reserveTokens, keepRecentTokens, model, modelThresholds, payloadLimitBytes, soft, newContext, source };
+  return { enabled, reserveTokens, keepRecentTokens, model, modelThresholds, payloadLimitBytes, soft, newContext, summary, source };
 }
 
 export function validateCompactionPatch(
@@ -509,6 +571,8 @@ export function validateCompactionPatch(
   if (patch.newContext?.enabled !== undefined && typeof patch.newContext.enabled !== "boolean") {
     errors.push(`newContext.enabled must be a boolean`);
   }
+
+  if (patch.summary !== undefined) errors.push(...validateSummary(patch.summary));
 
   for (const field of ["reserveTokens", "keepRecentTokens"] as const) {
     const value = patch[field];
@@ -667,6 +731,7 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
   if (typeof settings.newContext.enabled !== "boolean") {
     errors.push(`newContext.enabled must be a boolean`);
   }
+  errors.push(...validateSummary(settings.summary));
   return { errors, warnings: [] };
 }
 
@@ -798,6 +863,14 @@ async function patchSettingsFile(path: string, patch: CompactionConfigPatch): Pr
     }
     compaction.soft = merged;
   }
+  if (patch.summary !== undefined) {
+    const merged: Record<string, unknown> = isRecord(compaction.summary) ? { ...compaction.summary } : {};
+    for (const [key, value] of Object.entries(patch.summary)) {
+      if (value !== undefined) merged[key] = value;
+    }
+    if (Object.keys(merged).length > 0) compaction.summary = merged;
+    else delete compaction.summary;
+  }
   if (patch.newContext !== undefined) {
     const merged: Record<string, unknown> = isRecord(compaction.newContext) ? { ...compaction.newContext } : {};
     for (const [key, value] of Object.entries(patch.newContext)) {
@@ -819,6 +892,10 @@ async function unsetFieldInSettingsFile(path: string, field: keyof CompactionCon
         delete root.compaction.hard[field];
         if (Object.keys(root.compaction.hard).length === 0) delete root.compaction.hard;
       }
+    } else if (field === "summary" && isRecord(root.compaction.summary)) {
+      delete root.compaction.summary.thinkingLevel;
+      delete root.compaction.summary.timeoutMs;
+      if (Object.keys(root.compaction.summary).length === 0) delete root.compaction.summary;
     } else {
       delete root.compaction[field];
     }
@@ -872,6 +949,13 @@ async function replaceKnownFieldsInSettingsFile(path: string, values: Compaction
   else newContext.enabled = values.newContext.enabled;
   if (Object.keys(newContext).length === 0) delete compaction.newContext;
   else compaction.newContext = newContext;
+  const summary: Record<string, unknown> = isRecord(compaction.summary) ? { ...compaction.summary } : {};
+  for (const field of ["thinkingLevel", "timeoutMs"] as const) {
+    if (values.summary?.[field] === undefined) delete summary[field];
+    else summary[field] = values.summary[field];
+  }
+  if (Object.keys(summary).length === 0) delete compaction.summary;
+  else compaction.summary = summary;
   if (Object.keys(compaction).length === 0) delete root.compaction;
   else root.compaction = compaction;
   await atomicWriteJson(path, root);

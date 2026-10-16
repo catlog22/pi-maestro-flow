@@ -59,17 +59,24 @@
 
 ### Install
 
-> **v0.33.0:** Flow 0.33.0, Backends 0.1.7, Teammate 2.9.0, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
+> **v0.34.0:** Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0, Cockpit 0.24.4; other packages unchanged. The engine remains `maestro-flow >=0.5.91` (latest upstream/local 0.5.92, not an exact pin). Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
 ```
 
 Upgrades migrate Flow-managed companion registrations. A same-name local development override is preserved and reported in the startup log; update or remove that override explicitly.
+
+### v0.34.0 Usage Notes
+
+- Browser `start_video` / `stop_video` and chapter/action presentation capture silent WebM across runs/navigation on managed/profile/CDP. FFmpeg with VP8/WebM support is required; artifacts survive tab closure. Extension video is unsupported. See the [browser guide](../docs-site/src/content/docs/guides/lsp-browser.md).
+- Compaction summaries add thinking/timeout settings, live progress and retry/usage metrics; see [compaction settings](../docs-site/src/content/docs/guides/compaction-config.md).
+- Teammate aligns routing guidance; Monitor adds exact-owner lifecycle `subscribe` / `unsubscribe` / `subscriptions`. Workspace root delivery distinguishes queued from actual consumption, and interactive worker completion does not close its terminal. See [dispatch](../docs-site/src/content/docs/guides/teammate-dispatch.md).
+- Cockpit improves viewport and terminal restoration stability. HTTP/2, unknown-provider and stream-read failures enter retry classification; observation/RPC/search/error previews are bounded, not complete result evidence.
 
 ### Pi 0.99 Native Host and New Tools
 
@@ -1394,7 +1401,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 
 # ─── Knowledge ───
 maestro search "query" --code

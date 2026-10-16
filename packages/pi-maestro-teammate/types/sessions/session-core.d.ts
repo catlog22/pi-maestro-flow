@@ -193,6 +193,10 @@ export interface WindowThreadEntry {
     workspaceId: string;
     peerOwnerId: string;
     peerOwnerNonce: string;
+    /** Local incarnation that published/accepted this command; retained across recovery. */
+    localOwnerNonce?: string;
+    /** Actual terminal receipt evidence, not an observational wait deadline. */
+    receiptStatus?: "accepted" | "expired" | "rejected" | "error";
     direction: WindowThreadDirection;
     source: SessionMessageSource;
     messageKind?: SessionMessageKind;
@@ -239,6 +243,38 @@ export declare class WindowThreadStore {
     get(messageId: string, direction?: WindowThreadDirection): WindowThreadEntry | undefined;
     transition(messageId: string, direction: WindowThreadDirection, status: WindowThreadStatus, updatedAt?: number, effectiveMode?: Exclude<SessionMessageMode, "abort">): WindowThreadEntry | undefined;
     reconcileInjected(messageId: string, updatedAt?: number, effectiveMode?: Exclude<SessionMessageMode, "abort">): WindowThreadEntry | undefined;
+    /** SDK context-only custom messages persist without extension message_end events. */
+    reconcilePersistedMessages(sessionEntries: readonly unknown[], eligible: (entry: WindowThreadEntry) => boolean): void;
+    /** Caller must first validate the exact original command, never the current publisher nonce. */
+    migrateLocalOwnerNonce(messageId: string, direction: WindowThreadDirection, nonce: string): WindowThreadEntry | undefined;
+    /** Migrate accepted bindings or retain exact terminal evidence; never roll back delivery status. */
+    reconcileReceiptBinding(messageId: string, direction: WindowThreadDirection, receipt: {
+        status: string;
+        workspaceId: string;
+        commandId: string;
+        fromOwnerId: string;
+        fromOwnerNonce: string;
+        toOwnerId: string;
+        toOwnerNonce: string;
+        targetCorrelationId: string;
+    }, localOwnerId: string): WindowThreadEntry | undefined;
+    /** Only an exact accepted transport receipt may reconcile an old observational timeout. */
+    reconcileAcceptedReceipt(messageId: string, receipt: {
+        status: string;
+        workspaceId: string;
+        commandId: string;
+        fromOwnerId: string;
+        fromOwnerNonce: string;
+        toOwnerId: string;
+        toOwnerNonce: string;
+        targetCorrelationId: string;
+        deliveryStage?: "queued" | "injected" | "replied";
+        effectiveAction?: "steer" | "follow_up";
+        respondedAt: number;
+    }, local: {
+        ownerId: string;
+        ownerNonce: string;
+    }): WindowThreadEntry | undefined;
     snapshot(): WindowThreadSnapshot;
     subscribe(subscriber: (snapshot: WindowThreadSnapshot) => void, options?: {
         emitCurrent?: boolean;

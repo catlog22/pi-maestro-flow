@@ -530,7 +530,7 @@ test("window thread transitions pending to queued to injected to replied without
   const injected = store.reconcileInjected(messageId, 1_200, "follow_up");
   assert.equal(injected?.status, "injected");
   assert.equal(injected?.revision, 3);
-  assert.equal(persisted.length, 2, "injection reconciliation does not persist a crash-inverted thread receipt");
+  assert.equal(persisted.length, 3, "actual consumption is durable even before the custom message is persisted");
   const replied = store.transition(messageId, "incoming", "replied", 1_300);
   assert.equal(replied?.status, "replied");
   assert.equal(replied?.revision, 4);
@@ -538,7 +538,7 @@ test("window thread transitions pending to queued to injected to replied without
     status: "accepted",
     message: "workspace command already reached a terminal reply",
   });
-  assert.equal(persisted.length, 3);
+  assert.equal(persisted.length, 4);
   assert.equal(store.transition(messageId, "incoming", "rejected", 1_400), replied, "replied is terminal");
 });
 
@@ -599,7 +599,7 @@ test("window thread rebuild deduplicates persisted teammate messages against que
   journal.push({
     type: "custom_message",
     customType: "teammate-message",
-    details: { messageId, mode: "steer" },
+    details: { source: "workspace-peer", fromOwnerId: REMOTE_OWNER, messageId, mode: "steer" },
   });
 
   const rebuilt = new WindowThreadStore();

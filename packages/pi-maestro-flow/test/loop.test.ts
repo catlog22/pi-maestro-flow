@@ -69,7 +69,10 @@ test("loop schema enforces action-specific required fields and millisecond units
   assert.equal(Check(LoopParams, { action: "create", kind: "prompt", task: "check", intervalMs: "1s" }), false);
   assert.equal(Check(LoopParams, { action: "cancel" }), false);
   assert.equal(Check(LoopParams, { action: "cancel", loopId: "loop-1" }), true);
-  assert.match(String((LoopParams.properties.intervalMs as { description?: string }).description), /milliseconds/);
+  const intervalDescription = String((LoopParams.properties.intervalMs as { description?: string }).description);
+  assert.match(intervalDescription, /milliseconds/);
+  assert.match(intervalDescription, /300000 \(5 minutes\)/);
+  assert.match(intervalDescription, /between enqueues, not completed agent turns/);
 });
 
 test("loop schedules the first run after the configured delay", () => {
@@ -346,6 +349,8 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
     details?: { jobs?: LoopJobSnapshot[] };
   };
   type LoopTool = {
+    description: string;
+    promptGuidelines: string[];
     execute(id: string, params: Record<string, unknown>): Promise<LoopToolResult>;
     renderCall?(args: Record<string, unknown>, theme: RenderTheme, context: { isPartial?: boolean }): RenderComponent;
     renderResult?(
@@ -390,6 +395,14 @@ test("registerLoop publishes authoritative snapshots on scheduler updates and qu
 
   registerLoop(pi as never);
   assert.ok(tool);
+  assert.match(tool.description, /300000 \(5 minutes\)/);
+  assert.match(tool.description, /prompt ticks do not wait for the agent turn to finish/);
+  const guidelines = tool.promptGuidelines.join("\n");
+  assert.match(guidelines, /intervalMs=300000/);
+  assert.match(guidelines, /user's requested cadence/);
+  assert.match(guidelines, /lifecycle subscriptions/);
+  assert.match(guidelines, /unchanged state needs no repeated full transcript read/);
+  assert.match(guidelines, /remaining time; do not silently restart or extend the deadline/);
   assert.ok(eventHandlers.has(LOOP_QUERY_EVENT));
 
   eventHandlers.get(LOOP_QUERY_EVENT)!();

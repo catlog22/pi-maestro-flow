@@ -10,6 +10,7 @@ import {
   type BrowserManagerLike,
   type BrowserManagerStatus,
   type BrowserPickResult,
+  type BrowserVideoInfo,
 } from "./browser/manager.ts";
 import type { PairingApproval } from "./browser/bridge-server.ts";
 import { browserRunFailureDiagnostics, type BrowserRunDiagnostics } from "./browser/run-diagnostics.ts";
@@ -25,10 +26,10 @@ type BrowserDialogPolicy = "accept" | "dismiss";
 // rules. `guide` with no topic returns the registry index; `guide` + topic loads
 // one document. Knowhow updates flow through `maestro knowledge stage → promote`.
 
-const BrowserAction = Type.Unsafe<"open" | "close" | "run" | "guide" | "status" | "pair" | "pick">({
+const BrowserAction = Type.Unsafe<"open" | "close" | "run" | "guide" | "status" | "pair" | "pick" | "start_video" | "stop_video" | "video_chapter" | "video_show_actions" | "video_hide_actions">({
   type: "string",
-  enum: ["open", "close", "run", "guide", "status", "pair", "pick"],
-  description: "open: launch or attach a tab; close: close one or all tabs; run: execute JavaScript in a tab; guide: return the SOP registry index; status: start/probe the extension bridge and report authMode, transportReady, authenticatedConnected and pending paired requests; pair: paired mode only, approve one pending request with request_id + code; pick: inject an in-page element/component selector and paste the user's captures into their input box",
+  enum: ["open", "close", "run", "guide", "status", "pair", "pick", "start_video", "stop_video", "video_chapter", "video_show_actions", "video_hide_actions"],
+  description: "open: launch or attach a tab; close: close one or all tabs; run: execute JavaScript in a tab; guide: return the SOP registry index; status: start/probe the extension bridge and report authMode, transportReady, authenticatedConnected and pending paired requests; pair: paired mode only, approve one pending request with request_id + code; pick: inject an in-page element/component selector and paste the user's captures into their input box; start_video: start recording this named tab across runs (managed/profile/cdp only, requires FFmpeg); stop_video: finalize the WebM files and return paths and bytes; video_chapter: show a centered title/description card over a blurred backdrop; video_show_actions: enable action titles, target highlights and an animated pointer; video_hide_actions: disable action annotations",
 });
 const WaitUntil = Type.Unsafe<BrowserWaitUntil>({
   type: "string",
@@ -70,6 +71,16 @@ export const BrowserParams = Type.Object({
   wait_until: Type.Optional(WaitUntil),
   dialogs: Type.Optional(DialogPolicy),
   code: Type.Optional(Type.String({ minLength: 1, description: "For run: async host-side JavaScript with page/browser/tab and assert, wait(ms), display, print, signal, console; return produces output. Host code has no document/window; access DOM inside page.evaluate/tab.evaluate and pass host values as explicit arguments. page is Puppeteer on managed/profile/cdp, not Playwright; extension has limited adapters. For pair: exact six-digit confirmation code." })),
+  filename: Type.Optional(Type.String({ minLength: 1, description: "start_video only: .webm output path, relative to cwd or absolute. Defaults to video-{timestamp}-{id}.webm in cwd. Existing files are never overwritten; video artifacts persist after closing the tab." })),
+  size: Type.Optional(Type.Object({ width: Type.Integer({ minimum: 2 }), height: Type.Integer({ minimum: 2 }) }, { additionalProperties: false, description: "start_video only: maximum video dimensions. Preserves page aspect ratio, rounds down to encoder-compatible even dimensions, and does not change the viewport. Defaults to fitting within 800x800. Cannot combine with scale. Returned video.size reports actual dimensions." })),
+  title: Type.Optional(Type.String({ minLength: 1, description: "video_chapter only: centered chapter title." })),
+  description: Type.Optional(Type.String({ description: "video_chapter only: optional text below the title." })),
+  duration: Type.Optional(Type.Number({ minimum: 0, description: "Milliseconds: video_chapter blocks for this duration (default 2000); video_show_actions displays each action annotation for this duration (default 500)." })),
+  position: Type.Optional(Type.Unsafe<"top-left" | "top" | "top-right" | "bottom-left" | "bottom" | "bottom-right">({ type: "string", enum: ["top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"], description: "video_show_actions only: action-title position (default top-right)." })),
+  cursor: Type.Optional(Type.Unsafe<"pointer" | "none">({ type: "string", enum: ["pointer", "none"], description: "video_show_actions only: pointer animates between action points (default); none disables cursor decoration." })),
+  fps: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, description: "start_video only: recording frames per second (default 30). No audio." })),
+  scale: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 4, description: "start_video only: uniform output scale (default 1); does not change the page viewport." })),
+  ffmpeg_path: Type.Optional(Type.String({ minLength: 1, description: "start_video only: FFmpeg executable with VP8/WebM support (relative paths resolve against cwd). Omit to use ffmpeg on PATH. Compatible with Playwright's FFmpeg." })),
   request_id: Type.Optional(Type.String({ minLength: 1, description: "Pending pairing requestId returned by browser status; required for pair" })),
   topic: Type.Optional(Type.String({ description: "Guide-only SOP document id from the registry index (including custom topics). Omit to list topics and helper contracts; then load core and the relevant operation topic. Listing the index is not reading the full SOP." })),
   timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 300, description: "Execution budget in SECONDS (default 30, max 300), not per step. Managed/profile/cdp run setup, execution and postprocessing share one deadline; cleanup can add latency. Extension command/execution waits are bounded but setup/postprocessing may add latency. Puppeteer/tab waits and wait(ms) use MILLISECONDS. Keep waits below the budget with headroom. Managed run timeout closes owned resources; existing borrowed profile/CDP pages only disconnect and may continue executing. Extension interruption requires drain and explicit open revalidation." })),
@@ -78,6 +89,8 @@ export const BrowserParams = Type.Object({
 }, {
   additionalProperties: false,
   allOf: [
+    { if: { properties: { action: { const: "video_chapter" } }, required: ["action"] }, then: { required: ["title"] } },
+    { if: { properties: { action: { const: "start_video" } }, required: ["action"] }, then: { not: { required: ["size", "scale"] } } },
     {
       if: { properties: { action: { const: "run" } }, required: ["action"] },
       then: { required: ["code"], properties: { dialogs: false } },
@@ -93,7 +106,7 @@ export const BrowserParams = Type.Object({
 });
 
 export interface BrowserToolDetails {
-  action: "open" | "close" | "run" | "guide" | "status" | "pair" | "pick";
+  action: "open" | "close" | "run" | "guide" | "status" | "pair" | "pick" | "start_video" | "stop_video" | "video_chapter" | "video_show_actions" | "video_hide_actions";
   name?: string;
   url?: string;
   browser?: "headless" | "headed" | "connected" | "extension";
@@ -106,6 +119,7 @@ export interface BrowserToolDetails {
   status?: BrowserManagerStatus;
   pairingApproval?: PairingApproval;
   pick?: BrowserPickResult;
+  video?: BrowserVideoInfo;
   error?: { name: string; message: string };
   diagnostics?: BrowserRunDiagnostics;
 }
@@ -146,6 +160,7 @@ export function createBrowserTool(injectedManager?: BrowserManagerLike): Browser
       "To catch transient text (toasts/popups) during an action, await tab.monitorStart() before it and tab.monitorStop() after; monitorStop returns the strings that appeared and vanished.",
       "await tab.tabs() returns metadata records with string .url and optional string .title (use record.title ?? ''); these are not Page objects. await browser.pages() returns actionable Puppeteer Pages (or limited page adapters on extension): p.url() and await p.title(). For Puppeteer iframe handles use const frame = await handle.contentFrame(); assert(frame, 'Frame missing'); await frame.evaluate(fn), not handle.contentFrame without (). tab.evalInFrame is the simpler helper on Puppeteer channels. The run output also reports navigated and newTabs.",
       "Tool execution success is NOT application or assertion success. Check returned errors/failures, HTTP status and a non-empty expected sample count; count:0 with failures:[] is not a pass. Do not swallow required waits/assertions with catch(() => {}) or return success after caught errors. If catching for diagnostics, return an explicit failed outcome and report it. On error (including proxy/transport failure), earlier actions may have executed: inspect live state before retrying, never blindly repeat submit.",
+      "Video tools match the five public MCP video capabilities: action:start_video accepts filename:'demo.webm' and size:{width,height}, with compatible fps/scale/ffmpeg_path options; requires FFmpeg with VP8/WebM support. Default output fits within 800x800; size is a bound, normalized down to even output dimensions (video.size), not an exact padded canvas. action:video_chapter shows title, optional description, and a blurred full-screen backdrop, blocking for duration milliseconds (default2000). action:video_show_actions annotates subsequent page/tab actions with a callout and target highlight; duration defaults500ms, position defaults top-right (also top-left/top/bottom-left/bottom/bottom-right), cursor defaults pointer (animated between targets), or none. action:video_hide_actions removes annotations. Chapter and action decorations also work without video recording and survive navigation. action:stop_video finalizes files and returns {path,mimeType,recording:false,bytes,videos?}; no active recording returns 'No videos were recorded.'. Silent viewport capture spans runs/navigation and includes owned pages or popups created by the named tab; unrelated borrowed browser tabs are never recorded. close/close-all/session shutdown finalize active videos and remove decorations without deleting artifacts. Existing files are never overwritten. Extension video tools remain unsupported, with no channel fallback. This is video, not action/code generation.",
       "Close tabs when browser work is complete.",
       "Treat run code as trusted host code: it executes with the Pi process permissions, not in a security sandbox.",
       "For CAPTCHA / login-state / real-fingerprint scenarios, use an explicitly chosen profile with visible:true and app.attach_user_profile:true plus app.user_profile_dir. Auto-launch uses --remote-debugging-port=0 and reads DevToolsActivePort; the borrowed browser survives pi's exit and is never forcibly reclaimed. Chrome 136+ blocks debugging of the default profile even after all windows close: use an explicitly chosen non-default profile or install Pi Browser Bridge (pair only in paired mode) and select app.channel='extension' for the daily browser. A manually started fixed-port browser uses app.channel='cdp' and app.cdp_url. Never silently copy profiles or switch channels. Pure stealth is NOT enough for Cloudflare managed challenges.",
@@ -240,6 +255,30 @@ export function createBrowserTool(injectedManager?: BrowserManagerLike): Browser
           const approval = await manager!.pair(requestId, code, signal);
           const text = `Approved browser pairing ${approval.requestId} on port ${approval.port}. The extension will store the credentials and reconnect with authenticated authority.`;
           return success(text, { action: "pair", pairingApproval: approval, result: text });
+        }
+        if (params.action === "start_video" || params.action === "stop_video") {
+          const video = params.action === "start_video"
+            ? await manager!.startVideo(name, ctx.cwd, {
+                filename: params.filename, size: params.size, fps: params.fps, scale: params.scale, ffmpegPath: params.ffmpeg_path,
+              }, signal, timeoutMs)
+            : await manager!.stopVideo(name, signal, timeoutMs);
+          const text = !video ? "No videos were recorded." : video.recording
+            ? `Video recording started on tab ${JSON.stringify(name)}: ${video.path}. Call stop_video to finalize the WebM.`
+            : (video.videos ?? [video]).map((file) => `Video saved: ${file.path} (${file.bytes} bytes, ${file.mimeType}).`).join("\n");
+          return success(text, { action: params.action, name, video, result: text });
+        }
+        if (params.action === "video_chapter") {
+          if (!params.title?.trim()) throw new Error("video_chapter requires title.");
+          await manager!.videoChapter(name, { title: params.title, description: params.description, duration: params.duration }, signal, timeoutMs);
+          return success("Chapter displayed.", { action: params.action, name });
+        }
+        if (params.action === "video_show_actions") {
+          await manager!.videoShowActions(name, { duration: params.duration, position: params.position, cursor: params.cursor }, signal, timeoutMs);
+          return success("Action annotations enabled.", { action: params.action, name });
+        }
+        if (params.action === "video_hide_actions") {
+          await manager!.videoHideActions(name, signal, timeoutMs);
+          return success("Action annotations disabled.", { action: params.action, name });
         }
         if (params.action === "pick") {
           // Devin browser_preview semantics: captures go into the USER's input

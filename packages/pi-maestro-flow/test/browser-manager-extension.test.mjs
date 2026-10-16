@@ -74,6 +74,13 @@ test('T3 NONE manager reports live readiness not authentication or stale history
     assert.equal(status.authenticatedConnected, false); assert.equal(status.state, 'connected'); assert.equal(status.tabCount, 3); assert.deepEqual(status.pendingPairings, []);
     assert.ok(status.serverInstanceId); assert.ok(status.connectionGeneration);
     await open(a, 'same-name', 'one.example');
+    const beforeVideo = h.wire.length;
+    await assert.rejects(a.startVideo('same-name', process.cwd(), {}, undefined, 1000), /not supported on the extension channel[\s\S]*no channel was changed/);
+    await assert.rejects(a.stopVideo('same-name', undefined, 1000), /not supported on the extension channel/);
+    await assert.rejects(a.videoChapter('same-name', { title: 'Chapter' }, undefined, 1000), /not supported on the extension channel/);
+    await assert.rejects(a.videoShowActions('same-name', {}, undefined, 1000), /not supported on the extension channel/);
+    await assert.rejects(a.videoHideActions('same-name', undefined, 1000), /not supported on the extension channel/);
+    assert.equal(h.wire.length, beforeVideo, 'unsupported video must not dispatch bridge commands');
     const oldOwner = h.wire.find((frame) => frame.cmd === 'claim').owner;
     assert.notEqual(oldOwner.ownerId, 'same-name');
     await assert.rejects(open(b, 'same-name', 'one.example'), /tab_busy/);

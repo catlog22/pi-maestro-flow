@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CURSOR_MARKER, TuiAltScreen, TuiMainScreen, type Component, type Terminal, type TUI } from "@earendil-works/pi-tui";
+import { Container, CURSOR_MARKER, TuiAltScreen, TuiMainScreen, type Terminal, type TUI } from "@earendil-works/pi-tui";
 import { attachViewportStability } from "../src/viewport-stability.ts";
 import { createDynamicTuiReference, createSwitchingDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
@@ -40,21 +40,33 @@ function methodOwner(target: object, method: string): object {
 	return owner;
 }
 
-function renderHarness(initialLines: string[]) {
+function renderHarness(initialLines: string[], opaque = false) {
 	const terminal = new FakeTerminal();
 	const tui = new TuiMainScreen(terminal);
 	let lines = [...initialLines];
-	const component: Component = {
-		render: () => [...lines],
-		invalidate: () => undefined,
+	const mount = (): void => {
+		tui.clear();
+		if (opaque) {
+			tui.addChild({ render: () => [...lines], invalidate() {} });
+		} else {
+			// Fixed slots are independent components; opaque streams can reflow
+			// rows within a single component even when their total height matches.
+			for (let index = 0; index < lines.length; index += 1) {
+				tui.addChild({ render: () => [lines[index]!], invalidate() {} });
+			}
+		}
 	};
-	tui.addChild(component);
+	mount();
 	const internals = tui as unknown as TuiInternals;
 	return {
 		terminal,
 		tui,
 		internals,
-		setLines(next: string[]) { lines = [...next]; },
+		setLines(next: string[]) {
+			const heightChanged = lines.length !== next.length;
+			lines = [...next];
+			if (heightChanged && !opaque) mount();
+		},
 		render() { internals.doRender(); },
 	};
 }
@@ -102,7 +114,7 @@ test("a hidden Agent Bar change does not block a visible differential update", (
 test("same-height rows crossing the viewport boundary retain the native canonical redraw", () => {
 	const initial = ["agent one", "agent two", "todo", "editor", "footer"];
 	const shifted = ["agent new", "agent one", "agent two", "editor", "footer"];
-	const h = renderHarness(initial);
+	const h = renderHarness(initial, true);
 	attachViewportStability(h.tui);
 	h.render();
 	assert.equal(h.internals.previousViewportTop, 2);
@@ -118,7 +130,7 @@ test("same-height rows crossing the viewport boundary retain the native canonica
 test("mutable rows interleaved across the viewport boundary retain the native canonical redraw", () => {
 	const initial = ["history", "Todo 1/2", "@main · 9s", "editor", "footer"];
 	const interleaved = ["history", "@main · 10s", "Todo 2/2", "editor", "footer"];
-	const h = renderHarness(initial);
+	const h = renderHarness(initial, true);
 	attachViewportStability(h.tui);
 	h.render();
 	assert.equal(h.internals.previousViewportTop, 2);
@@ -129,6 +141,74 @@ test("mutable rows interleaved across the viewport boundary retain the native ca
 	assert.equal(h.tui.fullRedraws, 2, "an ambiguous boundary change must not combine old and new rows");
 	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), true);
 	assert.deepEqual(plainLines(h.internals.previousLines), interleaved);
+});
+
+test("an opaque boundary component cannot freeze a row that moves and changes text", () => {
+	const h = renderHarness(["history", "agent A running 1s", "todo", "editor", "footer"], true);
+	const patch = attachViewportStability(h.tui);
+	h.render();
+	const next = ["history", "new heading", "agent A running 2s", "editor", "footer"];
+	h.setLines(next);
+	h.render();
+	assert.deepEqual(plainLines(h.internals.previousLines), next);
+	assert.equal(h.tui.fullRedraws, 2);
+	patch.detach();
+});
+
+test("equal total height does not hide compensated component height changes", () => {
+	const h = renderHarness([]);
+	let upper = ["agent A running 1s"];
+	let lower = ["todo", "editor", "footer"];
+	const container = new Container();
+	container.addChild({ render: () => [...upper], invalidate() {} });
+	container.addChild({ render: () => [...lower], invalidate() {} });
+	h.tui.addChild({ render: () => ["history"], invalidate() {} });
+	h.tui.addChild(container);
+	const patch = attachViewportStability(h.tui);
+	h.render();
+	upper = ["new heading", "agent A running 2s"];
+	lower = ["editor", "footer"];
+	h.render();
+	assert.deepEqual(plainLines(h.internals.previousLines), ["history", ...upper, ...lower]);
+	assert.equal(h.tui.fullRedraws, 2);
+	patch.detach();
+});
+
+test("replaced hidden components retain native redraw even at identical positions", () => {
+	const h = renderHarness(["history", "old agent", "todo", "editor", "footer"]);
+	const patch = attachViewportStability(h.tui);
+	h.render();
+	h.tui.children[1] = { render: () => ["new agent"], invalidate() {} };
+	h.render();
+	assert.equal(plainLines(h.internals.previousLines)[1], "new agent");
+	assert.equal(h.tui.fullRedraws, 2);
+	patch.detach();
+});
+
+test("a render wrapper without canonical layout evidence retains native redraw", () => {
+	const h = renderHarness(["history", "old agent", "todo", "editor", "footer"]);
+	const render = h.tui.render;
+	h.tui.render = (width) => render.call(h.tui, width);
+	const patch = attachViewportStability(h.tui);
+	h.render();
+	h.setLines(["history", "new agent", "todo", "editor", "footer"]);
+	h.render();
+	assert.equal(plainLines(h.internals.previousLines)[1], "new agent");
+	assert.equal(h.tui.fullRedraws, 2);
+	patch.detach();
+});
+
+test("unchanged native frames keep layout evidence for subsequent hidden-only updates", () => {
+	const h = renderHarness(["history", "old agent", "todo", "editor", "footer"]);
+	const patch = attachViewportStability(h.tui);
+	h.render();
+	for (let tick = 0; tick < 4; tick += 1) {
+		h.setLines(["history", `agent tick ${tick}`, "todo", "editor", "footer"]);
+		h.render();
+	}
+	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(plainLines(h.internals.previousLines)[1], "old agent");
+	patch.detach();
 });
 
 test("changes at the first visible line remain live", () => {

@@ -129,8 +129,10 @@ type LocalObserveParamsInput = Omit<Static<typeof ObserveParams>, "targets" | "v
 };
 export declare const LocalObserveParams: Type.TUnsafe<LocalObserveParamsInput>;
 export declare const MonitorQueryParams: Type.TObject<{
-    action: Type.TUnsafe<"get" | "list" | "wait">;
+    action: Type.TUnsafe<"get" | "unsubscribe" | "list" | "subscribe" | "wait" | "subscriptions">;
     target: Type.TOptional<Type.TString>;
+    subscriptionId: Type.TOptional<Type.TString>;
+    events: Type.TOptional<Type.TArray<Type.TUnsafe<"completed" | "failed" | "running" | "disconnected" | "settled">>>;
     detail: Type.TOptional<Type.TUnsafe<"summary" | "full">>;
     cursor: Type.TOptional<Type.TString>;
     until: Type.TOptional<Type.TUnsafe<"settled" | "attention" | "change">>;

@@ -1,11 +1,28 @@
-import type { TUI } from "@earendil-works/pi-tui";
+import { Container, type TUI } from "@earendil-works/pi-tui";
 import { readStableReference } from "./stable-reference.ts";
 
 const VIEWPORT_STABILITY_MARKER = Symbol.for("pi-cockpit.viewport-stability");
 
 type ApplyLineResets = (lines: string[]) => string[];
 
-interface ViewportTuiInternals {
+interface ComponentLayout {
+	width: number;
+	children: Array<{ component: LayoutComponent; height: number }>;
+}
+
+interface LayoutComponent {
+	render?: (width: number) => string[];
+	children?: LayoutComponent[];
+	mouseLayout?: ComponentLayout;
+}
+
+interface HiddenComponent {
+	component: LayoutComponent;
+	start: number;
+	end: number;
+}
+
+interface ViewportTuiInternals extends LayoutComponent {
 	applyLineResets?: ApplyLineResets;
 	previousLines?: string[];
 	previousViewportTop?: number;
@@ -51,67 +68,48 @@ function isKittyImageLine(line: string | undefined): boolean {
 	return typeof line === "string" && line.includes("\x1b_G");
 }
 
-const ANSI_ESCAPE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
-
-function plainLine(line: string | undefined): string {
-	return line?.replace(ANSI_ESCAPE, "").trim() ?? "";
+// Container records these heights during the actual render. Never render a
+// component twice or infer row identity from its changing text.
+function measuredComponents(
+	root: LayoutComponent,
+	lineCount: number,
+	width: number,
+): HiddenComponent[] | undefined {
+	if (root.render !== Container.prototype.render) return undefined;
+	const result: HiddenComponent[] = [];
+	const seen = new Set<LayoutComponent>();
+	const walk = (node: LayoutComponent, start: number, height: number): boolean => {
+		if (height === 0) return true;
+		if (seen.has(node)) return false;
+		seen.add(node);
+		const layout = node.mouseLayout;
+		if (node.render === Container.prototype.render && Array.isArray(node.children)) {
+			if (!layout || layout.width !== width || layout.children.length !== node.children.length) return false;
+			let total = 0;
+			for (let index = 0; index < layout.children.length; index += 1) {
+				const child = layout.children[index]!;
+				if (child.component !== node.children[index] || !Number.isSafeInteger(child.height) || child.height < 0) return false;
+				total += child.height;
+			}
+			if (total !== height) return false;
+			let offset = start;
+			for (const child of layout.children) {
+				if (!walk(child.component, offset, child.height)) return false;
+				offset += child.height;
+			}
+			return true;
+		}
+		result.push({ component: node, start, end: start + height });
+		return true;
+	};
+	return Array.isArray(root.children) && walk(root, 0, lineCount) ? result : undefined;
 }
 
-function lineCounts(lines: readonly string[], start: number, end: number): Map<string, number> {
-	const counts = new Map<string, number>();
-	const lo = Math.max(0, start);
-	const hi = Math.min(end, lines.length);
-	for (let index = lo; index < hi; index += 1) {
-		const key = plainLine(lines[index]);
-		if (!key) continue;
-		counts.set(key, (counts.get(key) ?? 0) + 1);
-	}
-	return counts;
-}
-
-function mutableLineIdentity(line: string | undefined): string {
-	return plainLine(line).toLowerCase().replace(/\d+(?:\.\d+)?/g, "#");
-}
-
-function mutableRowsCrossViewportBoundary(
-	previousLines: readonly string[],
-	nextLines: readonly string[],
-	hiddenEnd: number,
-): boolean {
-	if (hiddenEnd <= 0 || hiddenEnd >= previousLines.length || hiddenEnd >= nextLines.length) return false;
-	const previousHidden = mutableLineIdentity(previousLines[hiddenEnd - 1]);
-	const previousVisible = mutableLineIdentity(previousLines[hiddenEnd]);
-	const nextHidden = mutableLineIdentity(nextLines[hiddenEnd - 1]);
-	const nextVisible = mutableLineIdentity(nextLines[hiddenEnd]);
-	return previousHidden !== ""
-		&& previousVisible !== ""
-		&& previousHidden !== previousVisible
-		&& previousHidden === nextVisible
-		&& previousVisible === nextHidden;
-}
-
-function crossesViewportBoundary(
-	previousLines: readonly string[],
-	nextLines: readonly string[],
-	hiddenEnd: number,
-): boolean {
-	if (mutableRowsCrossViewportBoundary(previousLines, nextLines, hiddenEnd)) return true;
-	// A row crosses the boundary when its hidden- and visible-side counts move
-	// in opposite directions (net flow across). Counting both regions — rather
-	// than tracking unique positions — detects crossings for duplicated lines
-	// (identical agent rows, separators) that a position map silently drops,
-	// while in-place edits of hidden rows change only one side and stay frozen.
-	const prevHidden = lineCounts(previousLines, 0, hiddenEnd);
-	const prevVisible = lineCounts(previousLines, hiddenEnd, previousLines.length);
-	const nextHidden = lineCounts(nextLines, 0, hiddenEnd);
-	const nextVisible = lineCounts(nextLines, hiddenEnd, nextLines.length);
-	const keys = new Set([...prevHidden.keys(), ...prevVisible.keys(), ...nextHidden.keys(), ...nextVisible.keys()]);
-	for (const key of keys) {
-		const hiddenDelta = (nextHidden.get(key) ?? 0) - (prevHidden.get(key) ?? 0);
-		const visibleDelta = (nextVisible.get(key) ?? 0) - (prevVisible.get(key) ?? 0);
-		if (hiddenDelta !== 0 && visibleDelta !== 0 && Math.sign(hiddenDelta) !== Math.sign(visibleDelta)) return true;
-	}
-	return false;
+function sameHiddenComponents(previous: readonly HiddenComponent[], next: readonly HiddenComponent[]): boolean {
+	return previous.length === next.length && previous.every((span, index) => {
+		const other = next[index]!;
+		return span.component === other.component && span.start === other.start && span.end === other.end;
+	});
 }
 
 function prototypeMethodSlot(target: object): ApplyLineResetsSlot | undefined {
@@ -164,10 +162,9 @@ function resolveApplyLineResetsSlot(internals: ViewportTuiInternals): ApplyLineR
 }
 
 /**
- * Treats the hidden viewport prefix as immutable scrollback while frame size is
- * stable. The next frame keeps the terminal's actual hidden text, so visible
- * changes can use pi-tui's differential path instead of clearing and replaying
- * the screen. Structural, resize and image changes retain the native path.
+ * Preserves fully hidden components only while their instances and measured
+ * positions stay unchanged. Boundary-spanning components, missing layout
+ * evidence, structural changes, resize and images retain the native path.
  */
 export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 	try {
@@ -183,11 +180,17 @@ export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 		if (existing) return { active: true, detach: existing.retain() };
 
 		let dispatches = 0;
+		const frames = new WeakMap<ViewportTuiInternals, { baseline: string[]; spans: HiddenComponent[] }>();
 		const wrapped: ApplyLineResets = function (this: ViewportTuiInternals, lines: string[]): string[] {
 			dispatches += 1;
 			const nextLines = original.call(this, lines);
 			const previousLines = this.previousLines;
 			const viewportTop = this.previousViewportTop;
+			const hiddenEnd = typeof viewportTop === "number" && Number.isFinite(viewportTop)
+				? Math.max(0, Math.min(nextLines.length, Math.trunc(viewportTop)))
+				: 0;
+			const spans = measuredComponents(this, nextLines.length, this.terminal?.columns ?? 0);
+			const previousFrame = frames.get(this);
 			if (
 				Array.isArray(previousLines)
 					&& previousLines.length === nextLines.length
@@ -196,20 +199,30 @@ export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 					&& viewportTop > 0
 					&& this.previousHeight === this.terminal?.rows
 					&& this.previousWidth === this.terminal?.columns
+					&& spans && previousFrame?.baseline === previousLines
+					&& sameHiddenComponents(previousFrame.spans, spans)
 			) {
-				const hiddenEnd = Math.min(previousLines.length, Math.trunc(viewportTop));
-				const hiddenHasKittyImage = previousLines.slice(0, hiddenEnd).some(isKittyImageLine)
-					|| nextLines.slice(0, hiddenEnd).some(isKittyImageLine);
-				// Equal total height does not prove row identity. If a stable row crossed
-				// the viewport boundary, freezing by index would duplicate it across the
-				// hidden and visible regions; retain pi-tui's canonical full redraw instead.
-				if (!hiddenHasKittyImage && !crossesViewportBoundary(previousLines, nextLines, hiddenEnd)) {
-					for (let index = 0; index < hiddenEnd; index += 1) {
-						const previous = previousLines[index];
-						if (previous !== undefined) nextLines[index] = previous;
+				let hiddenHasKittyImage = false;
+				for (let index = 0; index < hiddenEnd; index += 1) {
+					if (isKittyImageLine(previousLines[index]) || isKittyImageLine(nextLines[index])) {
+						hiddenHasKittyImage = true;
+						break;
+					}
+				}
+				if (!hiddenHasKittyImage) {
+					for (const span of spans) {
+						if (span.end > hiddenEnd) break;
+						for (let index = span.start; index < span.end; index += 1) nextLines[index] = previousLines[index]!;
 					}
 				}
 			}
+			if (spans) {
+				// The native no-change path keeps the old array rather than adopting
+				// nextLines. Track the exact baseline it will retain in either case.
+				const unchanged = previousLines?.length === nextLines.length
+					&& nextLines.every((line, index) => line === previousLines[index]);
+				frames.set(this, { baseline: unchanged ? previousLines! : nextLines, spans });
+			} else frames.delete(this);
 			return nextLines;
 		};
 		let references = 1;

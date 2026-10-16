@@ -11,7 +11,7 @@
  * host; unknown modes are ignored by terminals.
  *
  * Exactly one owner registers the handlers; they are removed when the last
- * consumer unregisters. SIGKILL / power loss cannot run any code — the
+ * consumer unregisters unless the bounded process-output fallback is retained. SIGKILL / power loss cannot run any code — the
  * documented recovery for that physical case is `reset` / `stty sane`.
  */
 
@@ -31,6 +31,17 @@ export const TERMINAL_RESTORE_SEQUENCE =
 
 const writers = new Set<WriteFn>();
 let handlersInstalled = false;
+
+// Pi's ProcessTerminal writes to stdout. This singleton references only the
+// process output capability, never a controller/TUI or its render history.
+const writeProcessOutput: WriteFn = (sequence) => { process.stdout.write(sequence); };
+
+/** Keep one comprehensive exit/crash fallback across fullscreen recreation.
+ * Unlike consumer leases, this process-lifetime writer survives UI disposal. */
+export function ensureProcessTerminalCleanup(): void {
+	writers.add(writeProcessOutput);
+	install();
+}
 
 /** Restore raw mode to cooked, unconditionally. Primary path is Node's stream
  * API; `stty sane` is a best-effort fallback for platforms where the console
@@ -100,7 +111,8 @@ function uninstall(): void {
 /**
  * Register a terminal whose alternate-screen state must be restored on process
  * exit or external SIGINT. Returns an idempotent disposer; the process handlers
- * are installed on first use and removed once the last consumer unregisters.
+ * are installed on first use and removed once the last consumer unregisters
+ * (unless the process-output fallback is retained).
  */
 export function registerTerminalCleanup(write: WriteFn): () => void {
 	writers.add(write);

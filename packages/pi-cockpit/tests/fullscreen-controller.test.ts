@@ -5,6 +5,7 @@ import { EDITOR_END_SENTINEL, EDITOR_START_SENTINEL } from "../src/claude-editor
 import { COCKPIT_FULLSCREEN_MARKER, createFullscreenController } from "../src/fullscreen-controller.ts";
 import { acquireMouseReporting } from "../src/mouse-reporting.ts";
 import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
+import { isTerminalCleanupInstalled, TERMINAL_RESTORE_SEQUENCE } from "../src/terminal-cleanup.ts";
 
 interface FakeHarness {
 	tui: TUI;
@@ -410,6 +411,29 @@ test("copy-on-select drag copies transcript text and wheel still scrolls", async
 	harness.inputHandler?.(WHEEL_UP);
 	assert.equal(controller.getScrollOffset(), 3);
 	controller.dispose();
+});
+
+test("controller recreation retains one process-output exit fallback without retaining old TUI writers", (t) => {
+	const originalWrite = process.stdout.write.bind(process.stdout);
+	let restores = 0;
+	t.mock.method(process.stdout, "write", (chunk: string | Uint8Array) => {
+		if (chunk === TERMINAL_RESTORE_SEQUENCE) { restores++; return true; }
+		return originalWrite(chunk);
+	});
+	const harnesses: FakeHarness[] = [];
+	for (let i = 0; i < 5; i++) {
+		const harness = makeHarness(() => buildLines([], EDITOR_BLOCK, CHROME));
+		const controller = createFullscreenController();
+		controller.attach(harness.tui);
+		controller.dispose();
+		harnesses.push(harness);
+	}
+	assert.equal(isTerminalCleanupInstalled(), true, "dispose must not remove the last exit safety net");
+	process.emit("exit", 0);
+	assert.equal(restores, 1, "five recreations leave one process-level writer");
+	assert.equal(harnesses.reduce((count, h) => count + h.writes.filter((seq) => seq === TERMINAL_RESTORE_SEQUENCE).length, 0), 0, "exit no longer calls disposed TUI writers");
+	process.emit("exit", 0);
+	assert.equal(restores, 1, "repeated shutdown is idempotent");
 });
 
 test("copy-on-select disabled: drags still select (highlight) but do not copy; wheel works", async () => {

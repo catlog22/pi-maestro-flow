@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
+import { normalizeBeforeAgentStartInput, type BeforeAgentStartInput } from "../before-agent-start.ts";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import { getTuiLocale } from "../tui/locale.ts";
 import {
@@ -394,8 +395,15 @@ function availableModels(ctx: ExtensionContext): Map<string, ReturnType<Extensio
 }
 
 function attachedImages(event: unknown): AttachedImageInput[] {
-  if (!isRecord(event) || !Array.isArray(event.images)) return [];
-  return event.images.flatMap((image) =>
+  if (!isRecord(event)) return [];
+  // Custom turns carry images in message.content, not the user-only images field.
+  const images = event.messageType === "custom"
+    ? isRecord(event.message) && Array.isArray(event.message.content)
+      ? event.message.content.filter((block) => isRecord(block) && block.type === "image")
+      : []
+    : event.images;
+  if (!Array.isArray(images)) return [];
+  return images.flatMap((image) =>
     isRecord(image) && typeof image.data === "string" && typeof image.mimeType === "string"
       ? [{ data: image.data, mimeType: image.mimeType }]
       : []
@@ -716,17 +724,22 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     settlementArbitration = undefined;
   });
 
-  pi.on("before_agent_start", async (event, ctx) => {
+  pi.on("before_agent_start", async (event: BeforeAgentStartInput, ctx) => {
+    const input = normalizeBeforeAgentStartInput(event);
     config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
     // Any arbitration snapshot surviving into a new turn is stale: it was
     // either consumed by the previous settlement dispatch or never claimed.
     // Clearing here prevents a later Goal settlement from misattributing it.
     settlementArbitration = undefined;
     const recoveryId = pendingRecoveryId;
-    if (active && recoveryId && event.prompt.includes(`[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`)) {
-      // The fallback acquisition was made after the previous logical run
-      // settled. Consume its handoff exactly once and retain that acquisition.
-      pendingRecoveryId = undefined;
+    if (active && recoveryId
+      && (input.messageType === "user" || input.customType === FAILOVER_RECOVERY_MARKER)
+      && input.text.includes(`[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`)) {
+      // Retain the acquisition and exhausted chain from the settled run. Pi
+      // 1.2.0 custom hooks recognize the handoff here; turn_start completes the
+      // transfer so a duplicate old-run settlement cannot settle it early.
+      // Preserve the legacy user-prompt acknowledgement behavior.
+      if (input.messageType === "user") pendingRecoveryId = undefined;
       active.used = false;
       active.lastError = undefined;
       active.lastHttpStatus = undefined;
@@ -860,10 +873,9 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   pi.on("turn_start", () => {
     if (!active) return;
     active.used = true;
-    // The fallback turn acknowledges the handoff; from here its own
-    // settlement may arbitrate. Keeping pendingRecoveryId set until this
-    // point prevents a stale duplicate old-run settlement from settling the
-    // not-yet-started fallback run.
+    // Complete the custom handoff, including on pre-1.2.0 hosts that omit its
+    // before_agent_start hook. From here the fallback's settlement may arbitrate.
+    // Until now pendingRecoveryId fences duplicate old-run settlements.
     pendingRecoveryId = undefined;
   });
 
@@ -1055,11 +1067,10 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         || active !== fallback
         || active.acquisition !== fallback.acquisition
         || fallback.failureRecorded) return;
-      // sendCustomMessage({ triggerTurn: true }) starts a hidden custom turn
-      // directly and does not emit before_agent_start. Transfer ownership to
-      // the fallback run before starting it so its agent_settled can arbitrate.
-      // pendingRecoveryId stays set until the fallback turn's turn_start
-      // acknowledges the handoff.
+      // triggerTurn starts a hidden custom turn. Pi 1.2.0 emits a custom
+      // before_agent_start hook; older hosts skip it, so prepare the fallback
+      // evidence here as well. Keep pendingRecoveryId until turn_start completes
+      // ownership transfer and allows the fallback's settlement to arbitrate.
       fallback.used = false;
       fallback.lastError = undefined;
       fallback.lastHttpStatus = undefined;

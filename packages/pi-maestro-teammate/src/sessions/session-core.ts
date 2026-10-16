@@ -508,6 +508,10 @@ export interface WindowThreadEntry {
   workspaceId: string;
   peerOwnerId: string;
   peerOwnerNonce: string;
+  /** Local incarnation that published/accepted this command; retained across recovery. */
+  localOwnerNonce?: string;
+  /** Actual terminal receipt evidence, not an observational wait deadline. */
+  receiptStatus?: "accepted" | "expired" | "rejected" | "error";
   direction: WindowThreadDirection;
   source: SessionMessageSource;
   messageKind?: SessionMessageKind;
@@ -567,6 +571,8 @@ function semanticThreadEntry(entry: Omit<WindowThreadEntry, "contentRevision">):
     workspaceId: entry.workspaceId,
     peerOwnerId: entry.peerOwnerId,
     peerOwnerNonce: entry.peerOwnerNonce,
+    ...(entry.localOwnerNonce === undefined ? {} : { localOwnerNonce: entry.localOwnerNonce }),
+    ...(entry.receiptStatus === undefined ? {} : { receiptStatus: entry.receiptStatus }),
     direction: entry.direction,
     source: entry.source,
     ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
@@ -605,6 +611,8 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || typeof entry.workspaceId !== "string" || entry.workspaceId.length === 0 || entry.workspaceId.length > 128
     || typeof entry.peerOwnerId !== "string" || entry.peerOwnerId.length === 0 || entry.peerOwnerId.length > 128
     || typeof entry.peerOwnerNonce !== "string" || entry.peerOwnerNonce.length === 0 || entry.peerOwnerNonce.length > 128
+    || (entry.localOwnerNonce !== undefined && (typeof entry.localOwnerNonce !== "string" || !/^[a-f0-9]{32}$/.test(entry.localOwnerNonce)))
+    || (entry.receiptStatus !== undefined && !["accepted", "expired", "rejected", "error"].includes(String(entry.receiptStatus)))
     || (entry.direction !== "outgoing" && entry.direction !== "incoming")
     || (entry.source !== "user" && entry.source !== "monitor" && entry.source !== "system")
     || (entry.messageKind !== undefined
@@ -653,6 +661,8 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     workspaceId: entry.workspaceId,
     peerOwnerId: entry.peerOwnerId,
     peerOwnerNonce: entry.peerOwnerNonce,
+    ...(entry.localOwnerNonce === undefined ? {} : { localOwnerNonce: entry.localOwnerNonce as string }),
+    ...(entry.receiptStatus === undefined ? {} : { receiptStatus: entry.receiptStatus as WindowThreadEntry["receiptStatus"] }),
     direction: entry.direction,
     source: entry.source,
     ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind as SessionMessageKind }),
@@ -682,15 +692,26 @@ function sessionEntryData(value: unknown): unknown {
   return entry.type === "custom" && entry.customType === WINDOW_THREAD_ENTRY_TYPE ? entry.data : undefined;
 }
 
-function persistedTeammateMessage(value: unknown): { messageId: string; effectiveMode?: "steer" | "follow_up" } | undefined {
+function persistedTeammateMessage(value: unknown): { messageId: string; effectiveMode?: "steer" | "follow_up"; fromOwnerId: string; fromOwnerNonce?: string; localOwnerNonce?: string } | undefined {
   if (!value || typeof value !== "object") return undefined;
   const entry = value as { type?: unknown; customType?: unknown; details?: unknown };
   if (entry.type !== "custom_message" || entry.customType !== "teammate-message"
     || !entry.details || typeof entry.details !== "object") return undefined;
-  const details = entry.details as { messageId?: unknown; mode?: unknown };
+  const details = entry.details as { messageId?: unknown; mode?: unknown; source?: unknown; fromOwnerId?: unknown; fromOwnerNonce?: unknown; localOwnerNonce?: unknown };
+  if (details.source !== "workspace-peer" || typeof details.fromOwnerId !== "string") return undefined;
   if (typeof details.messageId !== "string" || details.messageId.length === 0 || details.messageId.length > 128) return undefined;
   const effectiveMode = details.mode === "steer" || details.mode === "follow_up" ? details.mode : undefined;
-  return { messageId: details.messageId, ...(effectiveMode === undefined ? {} : { effectiveMode }) };
+  return { messageId: details.messageId, fromOwnerId: details.fromOwnerId,
+    ...(typeof details.fromOwnerNonce !== "string" ? {} : { fromOwnerNonce: details.fromOwnerNonce }),
+    ...(typeof details.localOwnerNonce !== "string" ? {} : { localOwnerNonce: details.localOwnerNonce }),
+    ...(effectiveMode === undefined ? {} : { effectiveMode }) };
+}
+
+function matchesPersistedTeammateMessage(entry: WindowThreadEntry, message: NonNullable<ReturnType<typeof persistedTeammateMessage>>): boolean {
+  return message.fromOwnerId === entry.peerOwnerId
+    && (message.fromOwnerNonce === undefined || message.fromOwnerNonce === entry.peerOwnerNonce)
+    && (entry.localOwnerNonce === undefined
+      || (message.localOwnerNonce === entry.localOwnerNonce && message.fromOwnerNonce === entry.peerOwnerNonce));
 }
 
 /** Bounded local projection of cross-window command history. */
@@ -749,7 +770,88 @@ export class WindowThreadStore {
       ...(effectiveMode === undefined ? {} : { effectiveMode }),
     });
     if (!candidate) throw new Error("Invalid injected window thread entry.");
-    this.#apply(candidate, false);
+    this.#apply(candidate, true);
+    return candidate;
+  }
+  /** SDK context-only custom messages persist without extension message_end events. */
+  reconcilePersistedMessages(sessionEntries: readonly unknown[], eligible: (entry: WindowThreadEntry) => boolean): void {
+    for (const sessionEntry of sessionEntries) {
+      const message = persistedTeammateMessage(sessionEntry);
+      if (!message) continue;
+      const entry = this.get(message.messageId, "incoming");
+      if (!entry || (entry.status !== "pending" && entry.status !== "queued")
+        || !eligible(entry) || !matchesPersistedTeammateMessage(entry, message)) continue;
+      this.reconcileInjected(entry.messageId, entry.updatedAt, message.effectiveMode);
+    }
+  }
+  /** Caller must first validate the exact original command, never the current publisher nonce. */
+  migrateLocalOwnerNonce(messageId: string, direction: WindowThreadDirection, nonce: string): WindowThreadEntry | undefined {
+    const previous = this.get(messageId, direction);
+    if (!previous || previous.localOwnerNonce !== undefined) return previous;
+    const { contentRevision: _contentRevision, ...base } = previous;
+    const candidate = validThreadEntry({ ...base, localOwnerNonce: nonce, revision: previous.revision + 1 });
+    if (!candidate) throw new Error("Invalid original window thread binding.");
+    this.#apply(candidate, true);
+    return candidate;
+  }
+  /** Migrate accepted bindings or retain exact terminal evidence; never roll back delivery status. */
+  reconcileReceiptBinding(
+    messageId: string,
+    direction: WindowThreadDirection,
+    receipt: { status: string; workspaceId: string; commandId: string; fromOwnerId: string; fromOwnerNonce: string;
+      toOwnerId: string; toOwnerNonce: string; targetCorrelationId: string },
+    localOwnerId: string,
+  ): WindowThreadEntry | undefined {
+    const previous = this.get(messageId, direction);
+    if (!previous || !["pending", "queued", "timeout", "injected", "replied", "accepted"].includes(previous.status)
+      || !["accepted", "expired", "rejected", "error"].includes(receipt.status) || receipt.commandId !== previous.messageId
+      || receipt.workspaceId !== previous.workspaceId || receipt.targetCorrelationId !== previous.targetCorrelationId
+      || (previous.receiptStatus !== undefined && previous.receiptStatus !== "accepted")) return previous;
+    const incoming = direction === "incoming";
+    const nonce = incoming ? receipt.fromOwnerNonce : receipt.toOwnerNonce;
+    if ((incoming ? receipt.fromOwnerId : receipt.toOwnerId) !== localOwnerId
+      || (incoming ? receipt.toOwnerId : receipt.fromOwnerId) !== previous.peerOwnerId
+      || (incoming ? receipt.toOwnerNonce : receipt.fromOwnerNonce) !== previous.peerOwnerNonce
+      || (previous.localOwnerNonce !== undefined && previous.localOwnerNonce !== nonce)
+      || (receipt.status !== "accepted" && previous.localOwnerNonce === undefined)) return previous;
+    if (previous.localOwnerNonce === nonce && previous.receiptStatus === receipt.status) return previous;
+    const { contentRevision: _contentRevision, ...base } = previous;
+    const candidate = validThreadEntry({ ...base, localOwnerNonce: nonce, receiptStatus: receipt.status, revision: previous.revision + 1 });
+    if (!candidate) throw new Error("Invalid accepted window receipt binding.");
+    this.#apply(candidate, true);
+    return candidate;
+  }
+  /** Only an exact accepted transport receipt may reconcile an old observational timeout. */
+  reconcileAcceptedReceipt(
+    messageId: string,
+    receipt: {
+      status: string; workspaceId: string; commandId: string;
+      fromOwnerId: string; fromOwnerNonce: string; toOwnerId: string; toOwnerNonce: string;
+      targetCorrelationId: string; deliveryStage?: "queued" | "injected" | "replied";
+      effectiveAction?: "steer" | "follow_up"; respondedAt: number;
+    },
+    local: { ownerId: string; ownerNonce: string },
+  ): WindowThreadEntry | undefined {
+    this.reconcileReceiptBinding(messageId, "outgoing", receipt, local.ownerId);
+    const previous = this.get(messageId, "outgoing");
+    if (!previous || !["pending", "queued", "timeout"].includes(previous.status)
+      || (previous.receiptStatus !== undefined && previous.receiptStatus !== "accepted")
+      || receipt.status !== "accepted" || receipt.commandId !== previous.messageId
+      || receipt.workspaceId !== previous.workspaceId
+      || receipt.fromOwnerId !== previous.peerOwnerId || receipt.fromOwnerNonce !== previous.peerOwnerNonce
+      || receipt.toOwnerId !== local.ownerId
+      || receipt.toOwnerNonce !== previous.localOwnerNonce
+      || receipt.targetCorrelationId !== previous.targetCorrelationId) return previous;
+    const { contentRevision: _contentRevision, ...base } = previous;
+    const candidate = validThreadEntry({
+      ...base, receiptStatus: "accepted", status: receipt.deliveryStage ?? "queued",
+      updatedAt: Math.max(previous.updatedAt, receipt.respondedAt), revision: previous.revision + 1,
+      ...(receipt.effectiveAction === undefined ? {} : { effectiveMode: receipt.effectiveAction }),
+    });
+    if (!candidate) throw new Error("Invalid accepted window receipt.");
+    if (previous.status === candidate.status && previous.receiptStatus === "accepted"
+      && previous.effectiveMode === candidate.effectiveMode) return previous;
+    this.#apply(candidate, true);
     return candidate;
   }
   snapshot(): WindowThreadSnapshot {
@@ -773,6 +875,8 @@ export class WindowThreadStore {
       && previous.workspaceId === input.workspaceId
       && previous.peerOwnerId === input.peerOwnerId
       && previous.peerOwnerNonce === input.peerOwnerNonce
+      && previous.localOwnerNonce === input.localOwnerNonce
+      && previous.receiptStatus === input.receiptStatus
       && previous.source === input.source
       && previous.messageKind === input.messageKind
       && JSON.stringify(previous.provenance) === JSON.stringify(input.provenance)
@@ -802,10 +906,10 @@ export class WindowThreadStore {
 
   rebuild(sessionEntries: readonly unknown[]): WindowThreadSnapshot {
     const byKey = new Map<string, WindowThreadEntry>();
-    const persistedMessages = new Map<string, "steer" | "follow_up" | undefined>();
+    const persistedMessages = new Map<string, NonNullable<ReturnType<typeof persistedTeammateMessage>>>();
     for (const sessionEntry of sessionEntries) {
       const message = persistedTeammateMessage(sessionEntry);
-      if (message) persistedMessages.set(message.messageId, message.effectiveMode);
+      if (message) persistedMessages.set(message.messageId, message);
       const candidate = validThreadEntry(sessionEntryData(sessionEntry));
       if (!candidate) continue;
       const key = threadKey(candidate);
@@ -819,8 +923,10 @@ export class WindowThreadStore {
       if (entry.direction !== "incoming"
         || (entry.status !== "pending" && entry.status !== "queued")
         || !persistedMessages.has(entry.messageId)) continue;
+      const message = persistedMessages.get(entry.messageId)!;
+      if (!matchesPersistedTeammateMessage(entry, message)) continue;
       const { contentRevision: _contentRevision, ...base } = entry;
-      const effectiveMode = persistedMessages.get(entry.messageId) ?? entry.effectiveMode;
+      const effectiveMode = message.effectiveMode ?? entry.effectiveMode;
       const injected = validThreadEntry({
         ...base,
         status: "injected",

@@ -59,17 +59,24 @@
 
 ### 安装
 
-> **v0.33.0：** Flow 0.33.0、Backends 0.1.7、Teammate 2.9.0、Cockpit 0.24.3 与 `maestro-flow >=0.5.91`。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
+> **v0.34.0：** Flow 0.34.0、Backends 0.1.7、Teammate 2.10.0、Cockpit 0.24.4，其余包不变；引擎仍为 `maestro-flow >=0.5.91`（上游最新/本地 0.5.92，非精确 pin）。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
 ```
 
 升级会迁移由 Flow 管理的 companion 注册；同名本地开发覆盖会被保留并在启动日志中提示，需显式升级或移除。
+
+### v0.34.0 使用提示
+
+- 浏览器新增 `start_video` / `stop_video` 与章节/动作演示：managed/profile/CDP 可跨 run/导航录制无声 WebM，需支持 VP8/WebM 的 FFmpeg；关闭 tab 后保留产物，extension 不支持。见[浏览器指南](../docs-site/src/content/docs/guides/lsp-browser.md)。
+- 压缩摘要新增 thinking/timeout 设置、实时进度与重试/用量指标，见[压缩配置](../docs-site/src/content/docs/guides/compaction-config.md)。
+- Teammate 统一路由说明，Monitor 新增精确 owner 生命周期 `subscribe` / `unsubscribe` / `subscriptions`；工作区 root 投递区分 queued 与实际消费，交互 worker 完成不自动关闭终端。见[调度指南](../docs-site/src/content/docs/guides/teammate-dispatch.md)。
+- Cockpit 改进视口与终端恢复稳定性；HTTP/2、unknown 与 stream-read 错误纳入重试分类，observation/RPC/search/error 预览有界，不能把截断预览当作完整完成证据。
 
 ### Pi 0.99 原生宿主与新工具
 
@@ -1354,7 +1361,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 
 # ─── 知识 ───
 maestro search "查询" --code

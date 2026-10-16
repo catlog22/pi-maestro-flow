@@ -44,20 +44,28 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ### Install pi-maestro-flow
 
-> **v0.33.0:** Flow 0.33.0, Backends 0.1.7, Teammate 2.9.0,
-> Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork provenance and
+> **v0.34.0:** Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0,
+> Cockpit 0.24.4; other packages unchanged. The engine remains `maestro-flow >=0.5.91`
+> (latest upstream/local 0.5.92, not an exact pin). Fork provenance and
 > verification limits are in [RELEASE.md](RELEASE.md). Native acceptance
 > covers Windows x64 / Node 22.22; minimum Node and macOS/Linux are unverified.
 
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 
 # Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
 ```
 
 A Flow-managed companion registration is migrated during upgrade. A same-name local development registration is intentionally preserved and reported in the startup log; update or remove that override explicitly.
+
+### v0.34.0 highlights
+
+- Browser `start_video` / `stop_video` capture silent WebM across runs/navigation on managed/profile/CDP; FFmpeg with VP8/WebM support is required. Chapter cards and action annotations are optional; finalized artifacts survive tab closure. Extension video is unsupported. See the [browser guide](docs-site/src/content/docs/guides/lsp-browser.md).
+- Compaction summaries expose thinking/timeout settings, live progress and retry/usage metrics; see [compaction settings](docs-site/src/content/docs/guides/compaction-config.md).
+- Teammate routing guidance is aligned with the tool contract; Monitor adds exact-owner `subscribe` / `unsubscribe` / `subscriptions`. Workspace root receipts distinguish queued delivery from actual consumption; interactive worker completion does not close its terminal. See [dispatch](docs-site/src/content/docs/guides/teammate-dispatch.md).
+- Cockpit improves viewport and terminal restoration stability. Retry classification includes HTTP/2, unknown-provider and stream-read failures, while observation/RPC/search/error previews remain bounded; a preview is not full completion evidence.
 
 ### v0.33.0 behavior boundaries
 
@@ -874,7 +882,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 pi list
 
 # ─── Knowledge ───

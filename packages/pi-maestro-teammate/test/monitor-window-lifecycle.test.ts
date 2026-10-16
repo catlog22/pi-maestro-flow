@@ -115,6 +115,68 @@ test("create passes provider selection unchanged through spawn and objective del
   assert.equal(state.calls.deliver, 1);
 });
 
+test("interactive launcher exit does not fail admission but headless worker exit does", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const start = source.indexOf("    commitPublished: (window, handle) => {");
+  const end = source.indexOf("\n    lookup:", start);
+  assert.ok(start >= 0 && end > start);
+  // Execute the actual adapter callback without starting real terminal windows.
+  const callback = source.slice(start, end).trim().replace(/^commitPublished: /, "").replace(/,$/, "");
+  const failures: unknown[] = [];
+  const registry = { thread: { get: () => ({ createdAt: 100, terminalResultRequested: true }) } };
+  const commit = new Function("sessionHostRegistry", "MANAGED_WINDOW_TERMINAL_DEADLINE_MS", "armManagedWindowTerminalFallback",
+    `return (${callback});`)(registry, 1_000, (_window: unknown, draft: unknown) => failures.push(draft)) as
+    (window: { presentation: string; runtime: object; terminalDeadlineAt?: number }, handle: { requestMessageId: string }) => void;
+  const handle = { requestMessageId: "request" };
+  for (const [presentation, exitCode, signalCode, expectedFailures] of [
+    ["interactive", 0, null, 0],
+    ["interactive", 1, null, 0],
+    ["interactive", null, "SIGTERM", 0],
+    ["headless", null, null, 0],
+    ["headless", 0, null, 1],
+    ["headless", null, "SIGTERM", 1],
+  ] as const) {
+    failures.length = 0;
+    const window = { presentation, runtime: { provider: "native", child: { exitCode, signalCode } }, terminalDeadlineAt: 0 };
+    commit(window, handle);
+    assert.equal(window.terminalDeadlineAt, 1_100);
+    assert.equal(failures.length, expectedFailures, `${presentation}: exit=${exitCode}, signal=${signalCode}`);
+  }
+});
+
+test("interactive window survives create and canonical completion until explicit close", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const start = source.indexOf("  async function completeManagedWindowTerminalCommand(");
+  const body = source.indexOf("): Promise<boolean> {", start) + "): Promise<boolean> ".length;
+  const end = source.indexOf("\n  async function stopAllManagedWindows", body);
+  assert.ok(start >= 0 && body > start && end > body);
+  const state = harness();
+  const created = await state.service.create({ ...request, presentation: "interactive" }, signal());
+  assert.equal(created.ok, true);
+  assert.equal(state.calls.stop, 0);
+  const window = Object.assign(state.window, {
+    presentation: "interactive", completionHandle: { requestMessageId: "request" },
+    settled: false, terminalPublished: false,
+  });
+  const windows = new Map([[window.name, window]]);
+  const terminal = { outcome: "completed", finalText: "done" };
+  const publications: unknown[] = [];
+  const complete = new Function("managedWindows", "publishWorkspaceTerminalCompletion", "monitorWindowSubscriptions", "stopManagedWindow",
+    `return async (request, terminal) => ${source.slice(body, end).trim()};`)(
+    windows, async (_request: unknown, result: unknown) => { publications.push(result); return true; },
+    { refresh: async () => {} }, async () => { state.calls.stop++; return { ok: true }; },
+  ) as (request: { messageId: string }, terminal: object) => Promise<boolean>;
+  assert.equal(await complete({ messageId: "request" }, terminal), true);
+  assert.equal(window.settled, true);
+  assert.equal(window.terminalPublished, true);
+  assert.deepEqual(publications, [terminal]);
+  assert.equal(windows.get(window.name), window);
+  assert.equal(state.calls.stop, 0, "settlement publishes the result without closing the interactive window");
+  const closed = await state.service.close(window.name);
+  assert.equal(closed.ok, true);
+  assert.equal(state.calls.terminate, 1, "only the separate close operation terminates the window");
+});
+
 test("create authority loss rolls back only the exact spawned window", async () => {
   let state!: ReturnType<typeof harness>;
   state = harness({

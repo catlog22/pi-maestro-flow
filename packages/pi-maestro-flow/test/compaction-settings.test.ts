@@ -9,6 +9,9 @@ import {
   DEFAULT_NEW_CONTEXT_ENABLED,
   DEFAULT_RESERVE_TOKENS,
   DEFAULT_SOFT_COMPACTION,
+  DEFAULT_SUMMARY_THINKING_LEVEL,
+  DEFAULT_SUMMARY_TIMEOUT_MS,
+  SUMMARY_THINKING_LEVELS,
   MAX_RESERVE_TOKENS,
   readEffectiveCompactionSettings,
   readScopeCompaction,
@@ -32,6 +35,125 @@ test("compaction settings use the Pi default user path when the agent directory 
     assert.equal(resolveUserSettingsPath(), join(homedir(), ".pi", "agent", "settings.json"));
   } finally {
     if (previousAgentDir !== undefined) process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  }
+});
+
+test("summary defaults are independent and merge per child across scopes", async () => {
+  const fixture = await createFixture();
+  try {
+    assert.deepEqual(SUMMARY_THINKING_LEVELS, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    const defaults = resolveEffectiveCompactionSettings({}, {});
+    assert.deepEqual(defaults.summary, { thinkingLevel: "off", timeoutMs: 240_000 });
+    defaults.summary.thinkingLevel = "max";
+    assert.equal(resolveEffectiveCompactionSettings({}, {}).summary.thinkingLevel, "off");
+    await writeSettings(fixture.agentDir, {
+      compaction: { summary: { thinkingLevel: "high", timeoutMs: 300_000 } },
+    });
+    let effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.deepEqual(effective.summary, { thinkingLevel: "high", timeoutMs: 300_000 });
+    assert.equal(effective.source.summary, "user");
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { summary: { timeoutMs: 2_147_483_647 } },
+    });
+    effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.deepEqual(effective.summary, { thinkingLevel: "high", timeoutMs: 2_147_483_647 });
+    assert.equal(effective.source.summary, "project");
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { summary: { thinkingLevel: "off" } },
+    });
+    assert.deepEqual(readEffectiveCompactionSettings(fixture.projectDir).summary, {
+      thinkingLevel: "off", timeoutMs: 300_000,
+    });
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("summary raw reads ignore malformed groups and children without masking valid siblings", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeSettings(fixture.agentDir, {
+      compaction: { summary: { thinkingLevel: "medium", timeoutMs: 120_000 } },
+    });
+    for (const summary of [null, [], false, "high", {}, { vendor: true }]) {
+      await writeSettings(join(fixture.projectDir, ".pi"), { compaction: { summary } });
+      assert.equal(readScopeCompaction("project", fixture.projectDir).summary, undefined);
+      assert.equal(readEffectiveCompactionSettings(fixture.projectDir).source.summary, "user");
+    }
+    for (const timeoutMs of [0, -1, 1.5, "1000", null, 2_147_483_648, Number.MAX_SAFE_INTEGER + 1]) {
+      await writeSettings(join(fixture.projectDir, ".pi"), {
+        compaction: { summary: { thinkingLevel: "low", timeoutMs } },
+      });
+      assert.deepEqual(readScopeCompaction("project", fixture.projectDir).summary, { thinkingLevel: "low" });
+      assert.deepEqual(readEffectiveCompactionSettings(fixture.projectDir).summary, {
+        thinkingLevel: "low", timeoutMs: 120_000,
+      });
+    }
+    for (const thinkingLevel of ["HIGH", "", " low ", 42, null]) {
+      await writeSettings(join(fixture.projectDir, ".pi"), {
+        compaction: { summary: { thinkingLevel, timeoutMs: 1 } },
+      });
+      assert.deepEqual(readScopeCompaction("project", fixture.projectDir).summary, { timeoutMs: 1 });
+    }
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("summary validation enforces thinking levels and timer-safe positive integer timeouts", () => {
+  for (const thinkingLevel of SUMMARY_THINKING_LEVELS) {
+    for (const timeoutMs of [1, 240_000, 2_147_483_647]) {
+      assert.deepEqual(validateCompactionPatch({ summary: { thinkingLevel, timeoutMs } }).errors, []);
+    }
+  }
+  for (const summary of [null, [], "off", false]) {
+    assert.deepEqual(validateCompactionPatch({ summary: summary as never }).errors, ["summary must be an object"]);
+  }
+  assert.match(validateCompactionPatch({ summary: { thinkingLevel: "invalid" as never } }).errors[0], /summary.thinkingLevel/);
+  for (const timeoutMs of [0, -1, 1.5, NaN, Infinity, 2_147_483_648, "1000", null]) {
+    assert.match(validateCompactionPatch({ summary: { timeoutMs: timeoutMs as never } }).errors[0], /summary.timeoutMs/);
+  }
+  const invalid = resolveEffectiveCompactionSettings({}, { summary: { timeoutMs: 0 } });
+  assert.match(validateEffectiveCompactionSettings(invalid).errors[0], /summary.timeoutMs/);
+});
+
+test("summary patch, scope replacement, and unset preserve unknown keys and unrelated settings", async () => {
+  const fixture = await createFixture();
+  try {
+    const path = resolveProjectSettingsPath(fixture.projectDir);
+    await writeSettings(fixture.agentDir, { compaction: { summary: { thinkingLevel: "high", timeoutMs: 120_000 } } });
+    const unrelated = { enabled: false, model: "p/m", newContext: { enabled: false }, soft: { enabled: false }, vendor: "keep" };
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      theme: "night",
+      compaction: { ...unrelated, summary: { thinkingLevel: "low", vendor: { retained: true } } },
+    });
+    await saveCompactionPatch("project", fixture.projectDir, { summary: { timeoutMs: 60_000 } });
+    let project = await readJson(path);
+    assert.deepEqual(project, {
+      theme: "night",
+      compaction: { ...unrelated, summary: { thinkingLevel: "low", timeoutMs: 60_000, vendor: { retained: true } } },
+    });
+    await saveCompactionScope("project", fixture.projectDir, {
+      ...unrelated, summary: { thinkingLevel: "max" },
+    });
+    project = await readJson(path);
+    assert.deepEqual(project.compaction.summary, { thinkingLevel: "max", vendor: { retained: true } });
+    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).summary.timeoutMs, 120_000);
+    await unsetCompactionField("project", fixture.projectDir, "summary");
+    assert.deepEqual(await readJson(path), {
+      theme: "night", compaction: { ...unrelated, summary: { vendor: { retained: true } } },
+    });
+    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).source.summary, "user");
+    await saveCompactionPatch("project", fixture.projectDir, { summary: { timeoutMs: 1 } });
+    await saveCompactionScope("project", fixture.projectDir, unrelated);
+    assert.deepEqual((await readJson(path)).compaction.summary, { vendor: { retained: true } });
+    await saveCompactionPatch("user", fixture.projectDir, { summary: { thinkingLevel: "off" } });
+    assert.deepEqual(readScopeCompaction("user", fixture.projectDir).summary, { thinkingLevel: "off", timeoutMs: 120_000 });
+    await unsetCompactionField("user", fixture.projectDir, "summary");
+    assert.deepEqual(await readJson(resolveUserSettingsPath()), {});
+    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).source.summary, "default");
+  } finally {
+    await fixture.dispose();
   }
 });
 
@@ -79,6 +201,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       payloadLimitBytes: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
+      summary: { thinkingLevel: DEFAULT_SUMMARY_THINKING_LEVEL, timeoutMs: DEFAULT_SUMMARY_TIMEOUT_MS },
       source: {
         enabled: "default",
         reserveTokens: "default",
@@ -87,6 +210,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
         modelThresholds: "default",
         soft: "default",
         newContext: "default",
+        summary: "default",
         payloadLimitBytes: "default",
       },
     });
@@ -111,6 +235,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       payloadLimitBytes: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
+      summary: { thinkingLevel: DEFAULT_SUMMARY_THINKING_LEVEL, timeoutMs: DEFAULT_SUMMARY_TIMEOUT_MS },
       source: {
         enabled: "project",
         reserveTokens: "user",
@@ -119,6 +244,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
         modelThresholds: "default",
         soft: "default",
         newContext: "default",
+        summary: "default",
         payloadLimitBytes: "default",
       },
     });
@@ -154,6 +280,7 @@ test("compaction settings ignore malformed files and invalid optional fields", a
       payloadLimitBytes: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
+      summary: { thinkingLevel: DEFAULT_SUMMARY_THINKING_LEVEL, timeoutMs: DEFAULT_SUMMARY_TIMEOUT_MS },
       source: {
         enabled: "default",
         reserveTokens: "default",
@@ -162,6 +289,7 @@ test("compaction settings ignore malformed files and invalid optional fields", a
         modelThresholds: "default",
         soft: "default",
         newContext: "default",
+        summary: "default",
         payloadLimitBytes: "default",
       },
     });

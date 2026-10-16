@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { normalizeBeforeAgentStartInput, type BeforeAgentStartInput } from "../before-agent-start.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   ContextEditEntryDraft,
@@ -529,7 +530,7 @@ export interface MidTurnCompactionStatus {
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
   /** Trusted input boundary: only a matching raw recovery prompt may become consumed. */
-  onBeforeAgentStart(prompt: string, ctx: ExtensionContext): void;
+  onBeforeAgentStart(event: BeforeAgentStartInput | string, ctx: ExtensionContext): void;
   /** Associated lifecycle boundary: only the wake consumed immediately before it may start. */
   onAgentStart(ctx: ExtensionContext): void;
   /** Idempotently dispatch the current logical wake when settled/idle. */
@@ -640,7 +641,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     return state.settingsSnapshot;
   }
   function sameSettings(left: CompactionSettings, right: CompactionSettings): boolean {
-    return JSON.stringify(left) === JSON.stringify(right);
+    // Summary tuning does not change pruning/admission. Older durable intents
+    // lack this group and must still recover under the new defaults.
+    const withoutSummary = (key: string, value: unknown) => key === "summary" ? undefined : value;
+    return JSON.stringify(left, withoutSummary) === JSON.stringify(right, withoutSummary);
   }
   function notifyPressureOnce(ctx: ExtensionContext, key: string, message: string): void {
     if (state.notifiedPressureKeys.has(key)) return;
@@ -899,6 +903,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   function ensureRecoveryWake(ctx: ExtensionContext): boolean {
     const wake = state.recoveryWake;
     if (!wake || wakeIsTerminal(wake)) return false;
+    // followUp delivery still enters host prompt preflight, which rejects while
+    // compact() is active. Only its callback proves the host owner has settled.
+    if (state.running || state.zombieOwner !== undefined) return false;
     if (expireWakeIfNeeded(wake, ctx)) return false;
     if (!branchMatchesWake(ctx, wake)) {
       transitionWakeTerminal(wake, "failed", "recovery wake branch checkpoint is no longer active", ctx);
@@ -1322,6 +1329,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       updatePressureStatus(ctx, pressure, attributedCacheDelta);
       state.cacheDelta = undefined;
       persistPruneManifest(pi, state);
+      // The late host callback still owns this interrupted task. Pressure can
+      // prune its input, but must not replace the obligation it will settle.
+      if (state.zombieOwner !== undefined
+        && state.pendingIntent
+        && (state.pendingIntent.contextExhausted || state.pendingIntent.loopCritical || state.pendingIntent.requestBlocked)) {
+        return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
+      }
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
         state.criticalLoopStreak = 0;
@@ -1580,13 +1594,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     // (contextExhausted / loopCritical). Breaker-tripped cycles fall back to
     // native compaction (exhausted) or a bare continue (loop-critical);
     // otherwise a retry prompt asks the model to re-run compaction first.
-    // The watchdog path passes allowNativeFallback:false because an unconfirmed
-    // host submission may still be alive; prompt-based recovery is safe — its
-    // settle re-checks zombie state before submitting anything.
-    const recoverInterruptedTask = (
-      intent: PendingCompactionIntent,
-      options: { allowNativeFallback?: boolean } = {},
-    ): void => {
+    // This policy runs only before submission or after a host callback: a
+    // watchdog timeout cannot prove that either compaction or prompt is safe.
+    const recoverInterruptedTask = (intent: PendingCompactionIntent): void => {
       if (intent.requestBlocked) return;
       if ((!intent.contextExhausted && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
       if (state.breaker.trippedAtTurn !== undefined) {
@@ -1594,7 +1604,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         if (intent.loopCritical) {
           state.loopCriticalBlocked = false;
           queueInterruptedContinuation(intent, ctx, CONTINUE_PROMPT, false);
-        } else if (options.allowNativeFallback !== false) {
+        } else {
           fallbackToNativeCompaction(ctx, intent);
         }
         return;
@@ -1808,16 +1818,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           );
           return;
         }
-        const breakerTripped = state.breaker.trippedAtTurn !== undefined;
         ctx.ui.notify(
-          breakerTripped
-            ? "Mid-turn compaction timed out; native fallback was not started because the host operation may still be active. Retry manually after it settles."
-            : "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
+          "Mid-turn compaction timed out locally, but the host operation may still be active. Recovery will wait for it to complete or fail; no new prompt or compaction was submitted.",
           "warning",
         );
-        // No native fallback here: the timed-out submission may still be alive.
-        // Prompt-based recovery is safe — its settle re-checks zombie state.
-        recoverInterruptedTask(intent, { allowNativeFallback: false });
       }, leaseTimeoutMs);
       watchdog.unref?.();
     };
@@ -1834,8 +1838,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           `The timed-out mid-turn compaction eventually failed: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
-        // The watchdog already dispatched the one recovery wake. Re-entering
-        // queueInterruptedContinuation is idempotent for the same intent.
+        // The host has now settled, so retry recovery can safely submit input.
         if (!state.running && interrupted) recoverInterruptedTask(intent);
         return;
       }
@@ -2288,7 +2291,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         );
       }
     },
-    onBeforeAgentStart(prompt, ctx) {
+    onBeforeAgentStart(event, ctx) {
+      const input = normalizeBeforeAgentStartInput(typeof event === "string" ? { prompt: event } : event);
+      // Custom turns neither acknowledge nor supersede a user-input recovery wake.
+      if (input.messageType !== "user") return;
+      const prompt = input.text;
       const wake = state.recoveryWake;
       if (!wake || (wake.state !== "prepared" && wake.state !== "queued")) return;
       if (expireWakeIfNeeded(wake, ctx)) return;
@@ -2812,7 +2819,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           : state.pendingContinuationIntent;
       // Native/foreign compaction has no owned callback, so it delivers now.
       // An owned callback keeps the same durable continuation until onComplete.
-      const settledIntent = wasPreempted || activeRequestOwner === undefined
+      const settledIntent = wasPreempted || (activeRequestOwner === undefined && state.zombieOwner === undefined)
         ? continuationIntent
         : undefined;
       if (wasPreempted) releaseInFlight();

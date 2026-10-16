@@ -14,6 +14,7 @@ import type {
 class FakeBrowserManager implements BrowserManagerLike {
   readonly opened = new Map<string, BrowserOpenOptions>();
   readonly closed: string[] = [];
+  readonly videoCalls: string[] = [];
   closeBarrier?: Promise<void>;
 
   async open(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
@@ -36,6 +37,22 @@ class FakeBrowserManager implements BrowserManagerLike {
     if (!this.opened.has(name)) throw new Error(`No tab named ${name}`);
     return { displays: [], returnValue: undefined, screenshots: [], url: "about:blank" };
   }
+
+  async startVideo(name: string) {
+    if (!this.opened.has(name)) throw new Error(`No tab named ${name}`);
+    this.videoCalls.push(`start:${name}`);
+    return { path: `${name}.webm`, mimeType: "video/webm" as const, recording: true };
+  }
+
+  async stopVideo(name: string) {
+    if (!this.opened.has(name)) throw new Error(`No tab named ${name}`);
+    this.videoCalls.push(`stop:${name}`);
+    return { path: `${name}.webm`, mimeType: "video/webm" as const, recording: false, bytes: 42 };
+  }
+
+  async videoChapter(name: string) { this.videoCalls.push(`chapter:${name}`); }
+  async videoShowActions(name: string) { this.videoCalls.push(`show:${name}`); }
+  async videoHideActions(name: string) { this.videoCalls.push(`hide:${name}`); }
 
   async status(): Promise<BrowserManagerStatus> {
     return {
@@ -110,6 +127,16 @@ test("teammate browser broker runs in root manager with actor-scoped tab names",
     }],
     "teammate status must translate and expose only the caller's named tabs",
   );
+
+  await broker.execute(request("actor-a", { action: "start_video" }), ctx);
+  await broker.execute(request("actor-b", { action: "start_video" }), ctx);
+  await broker.execute(request("actor-a", { action: "stop_video" }), ctx);
+  assert.deepEqual(manager.videoCalls, ["start:teammate:actor-a:main", "start:teammate:actor-b:main", "stop:teammate:actor-a:main"]);
+
+  for (const action of ["video_chapter", "video_show_actions", "video_hide_actions"]) {
+    await broker.execute(request("actor-b", { action, title: "Chapter" }), ctx);
+  }
+  assert.deepEqual(manager.videoCalls.slice(-3), ["chapter:teammate:actor-b:main", "show:teammate:actor-b:main", "hide:teammate:actor-b:main"]);
 
   await broker.execute(request("actor-a", { action: "close", all: true }), ctx);
   assert.deepEqual(manager.closed, ["teammate:actor-a:main"]);

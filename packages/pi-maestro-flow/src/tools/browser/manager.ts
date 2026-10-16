@@ -11,6 +11,11 @@ import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { PICKER_INJECT_JS, PICKER_POLL_JS, PICKER_TEARDOWN_JS } from "./picker.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
+import { BrowserVideoRecording, type BrowserVideoInfo, type BrowserVideoOptions } from "./video.ts";
+export type { BrowserVideoInfo, BrowserVideoOptions } from "./video.ts";
+import { createCdpVideoPage } from "./video-recorder.ts";
+import { BrowserVideoPresentation, type BrowserVideoChapterOptions, type BrowserVideoActionOptions } from "./video-presentation.ts";
+export type { BrowserVideoChapterOptions, BrowserVideoActionOptions } from "./video-presentation.ts";
 import { runOcr, runDetect, isLocalVisionError, type OcrOutcome, type DetectOutcome } from "../../providers/local-vision.ts";
 import { attachBrowserRunFailureDiagnostics, BrowserRunDiagnosticCapture, createBrowserRunDeadline, type BrowserRunDiagnostics } from "./run-diagnostics.ts";
 import {
@@ -273,6 +278,7 @@ export interface BrowserNamedTabStatus {
   state?: "ready" | "busy" | "draining" | "needs_revalidation" | "disconnected" | "closed";
   pendingCommands?: number;
   drainingCommands?: number;
+  video?: BrowserVideoInfo;
 }
 
 export interface BrowserManagerStatus {
@@ -300,6 +306,11 @@ export interface BrowserManagerLike {
   open(options: BrowserOpenOptions): Promise<BrowserTabInfo>;
   run(name: string, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number, maxOutputBytes?: number): Promise<BrowserRunOutput>;
   pick(name: string, onCapture: BrowserPickCaptureCallback | undefined, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserPickResult>;
+  startVideo(name: string, cwd: string, options: BrowserVideoOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserVideoInfo>;
+  stopVideo(name: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserVideoInfo | undefined>;
+  videoChapter(name: string, options: BrowserVideoChapterOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<void>;
+  videoShowActions(name: string, options: BrowserVideoActionOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<void>;
+  videoHideActions(name: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<void>;
   status(signal?: AbortSignal): Promise<BrowserManagerStatus>;
   pair(requestId: string, code: string, signal?: AbortSignal): Promise<PairingApproval>;
   close(name: string): Promise<boolean>;
@@ -364,6 +375,19 @@ interface PuppeteerEntry extends BaseEntry {
   requestScope?: BrowserListenerScope;
   elementSelectors: Map<number, string>;
   cdpSession?: CDPSession;
+  video?: Promise<BrowserVideoRecording>;
+  videoInfo?: BrowserVideoInfo;
+  videoAbort?: AbortController;
+  videoPages: Set<Page>;
+  videoChildren?: Map<Page, Promise<BrowserVideoRecording>>;
+  videoStarts?: Set<Promise<void>>;
+  videoFailures?: unknown[];
+  videoConfig?: { cwd: string; options: BrowserVideoOptions; path: string };
+  videoTargetListener?: (target: Target) => void;
+  videoFinalizing?: Promise<BrowserVideoInfo | undefined>;
+  videoPresentation?: BrowserVideoPresentation;
+  presentationAbort?: AbortController;
+  presentationOperation?: Promise<void>;
   /** Compiled navigation guard from open options; undefined disables guarding. */
   policy?: CompiledNavigationPolicy;
   policyGuardsInstalled?: boolean;
@@ -459,6 +483,7 @@ export class BrowserManager implements BrowserManagerLike {
   #tabs = new Map<string, TabEntry>();
   #opening = new Map<string, OpeningEntry>();
   #provisionalExtensionOwners = new Set<ExtensionOperationOwner>();
+  #puppeteerDisposals = new Set<Promise<void>>();
   #lifecycle = new AbortController();
 
   async open(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
@@ -474,7 +499,7 @@ export class BrowserManager implements BrowserManagerLike {
     let existing = this.#tabs.get(options.name);
     if (existing?.backend === "puppeteer" && (!existing.browser.connected || existing.page.isClosed())) {
       this.#tabs.delete(options.name);
-      await disposeEntry(existing);
+      await this.#disposePuppeteer(existing);
       existing = undefined;
       const raced = this.#opening.get(options.name);
       if (raced) {
@@ -540,6 +565,7 @@ export class BrowserManager implements BrowserManagerLike {
         page,
         owned: connection.owned,
         ownedPage,
+        videoPages: new Set([page]),
         profileDir: connection.profileDir,
         elementSelectors: new Map(),
         ownedTempFiles: new Set(),
@@ -668,6 +694,105 @@ export class BrowserManager implements BrowserManagerLike {
       return this.#runTrackedExtension(entry, code, cwd, signal, timeoutMs, maxOutputBytes);
     }
     return this.#runPuppeteer(entry, code, cwd, signal, timeoutMs, maxOutputBytes);
+  }
+
+  async startVideo(name: string, cwd: string, options: BrowserVideoOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserVideoInfo> {
+    const entry = this.#videoEntry(name, signal);
+    if (entry.video) throw new Error(`Tab "${name}" is already recording. Stop its video first.`);
+    const controller = new AbortController();
+    const combined = combineSignals(signal, controller.signal, this.#lifecycle.signal);
+    entry.busy = true;
+    entry.videoAbort = controller;
+    entry.videoChildren = new Map();
+    const pageStarts = new Set<Promise<void>>();
+    entry.videoStarts = pageStarts;
+    entry.videoFailures = [];
+    entry.videoTargetListener = (target) => {
+      if (target.type() !== "page") return;
+      const opener = target.opener();
+      if (!opener || ![...entry.videoPages].some((page) => page.target() === opener)) return;
+      const starting = raceAbort(target.page(), controller.signal, timeoutMs).then(async (page) => {
+        if (page) { entry.videoPages.add(page); await startChildVideo(entry, page); }
+      });
+      trackChildVideoStart(entry, starting);
+    };
+    entry.browser.on("targetcreated", entry.videoTargetListener);
+    const pending = BrowserVideoRecording.start(createCdpVideoPage(entry.page), cwd, { ...options, signal: combined.signal });
+    entry.video = pending;
+    const startup = (async () => {
+      const video = await pending;
+      throwIfAborted(combined.signal);
+      entry.videoInfo = video.info;
+      entry.videoConfig = { cwd, options: { ...options, signal: controller.signal }, path: video.info.path };
+      await Promise.all(pageStarts);
+      for (const page of entry.videoPages) await startChildVideo(entry, page);
+      throwIfAborted(combined.signal);
+      return { ...video.info };
+    })();
+    try {
+      return await raceAbort(startup, combined.signal, timeoutMs);
+    } catch (error) {
+      controller.abort();
+      // All page starts share the deadline; detach their owned startup sessions before finalization.
+      const [cleanup] = await Promise.allSettled([stopEntryVideo(entry)]);
+      if (cleanup.status === "rejected" && cleanup.reason !== error) {
+        throw new AggregateError([error, cleanup.reason], "Browser video start and cleanup failed.");
+      }
+      throw error;
+    } finally {
+      entry.busy = false;
+      combined.dispose();
+    }
+  }
+
+  async stopVideo(name: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserVideoInfo | undefined> {
+    throwIfAborted(signal);
+    if (!this.#tabs.has(name)) return undefined;
+    const entry = this.#videoEntry(name, signal);
+    if (!entry.video) return undefined;
+    entry.busy = true;
+    const stopping = stopEntryVideo(entry).finally(() => { entry.busy = false; });
+    // Interruption stops waiting, not finalization; close also joins this recorder.
+    return raceAbort(stopping, signal, timeoutMs);
+  }
+
+  videoChapter(name: string, options: BrowserVideoChapterOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    return this.#presentVideo(name, signal, timeoutMs, (presentation, combined) => presentation.chapter(options, combined));
+  }
+
+  videoShowActions(name: string, options: BrowserVideoActionOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    return this.#presentVideo(name, signal, timeoutMs, (presentation, combined) => presentation.showActions(options, combined));
+  }
+
+  videoHideActions(name: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    return this.#presentVideo(name, signal, timeoutMs, (presentation, combined) => presentation.hideActions(combined));
+  }
+
+  async #presentVideo(name: string, signal: AbortSignal | undefined, timeoutMs: number, operation: (presentation: BrowserVideoPresentation, signal: AbortSignal) => Promise<void>): Promise<void> {
+    const entry = this.#videoEntry(name, signal);
+    const controller = new AbortController();
+    const combined = combineSignals(signal, controller.signal, this.#lifecycle.signal);
+    const presentation = entry.videoPresentation ??= new BrowserVideoPresentation(entry.page);
+    entry.busy = true;
+    entry.presentationAbort = controller;
+    const pending = Promise.resolve().then(() => operation(presentation, combined.signal)).finally(() => {
+      entry.busy = false;
+      entry.presentationAbort = undefined;
+      if (entry.presentationOperation === pending) entry.presentationOperation = undefined;
+      combined.dispose();
+    });
+    entry.presentationOperation = pending;
+    try { await raceAbort(pending, combined.signal, timeoutMs); }
+    catch (error) { controller.abort(); throw error; }
+  }
+
+  #videoEntry(name: string, signal: AbortSignal | undefined): PuppeteerEntry {
+    throwIfAborted(signal);
+    const entry = this.#tabs.get(name);
+    if (!entry) throw new Error(`No tab named "${name}". Open it first.`);
+    if (entry.backend === "extension") throw new Error("Browser video recording and presentation are not supported on the extension channel. Use an explicitly selected managed/profile/cdp tab; no channel was changed.");
+    if (entry.busy) throw new Error(`Tab "${name}" is busy.`);
+    return entry;
   }
 
   // In-page element/component picker (Devin browser_preview port, see
@@ -883,7 +1008,20 @@ export class BrowserManager implements BrowserManagerLike {
               }
             }
           : undefined;
-        const runApis = observeBrowserRunApis(name, entry.page, entry.browser, tab, undefined, navGuard, (operation) => {
+        const visualApis = entry.videoPresentation?.wrapApis(entry.page, tab, runSignal) ?? { page: entry.page, tab };
+        const videoBrowser = new Proxy(entry.browser, {
+          get(browser, property) {
+            if (property === "newPage") return async () => {
+              const page = await browser.newPage();
+              entry.videoPages.add(page);
+              await startChildVideo(entry, page);
+              return page;
+            };
+            const value = Reflect.get(browser, property, browser);
+            return typeof value === "function" ? value.bind(browser) : value;
+          },
+        });
+        const runApis = observeBrowserRunApis(name, visualApis.page, videoBrowser, visualApis.tab, undefined, navGuard, (operation) => {
           throwIfAborted(runSignal);
           deadline.remaining();
           return capture.operation(operation);
@@ -1063,6 +1201,7 @@ export class BrowserManager implements BrowserManagerLike {
         state: entry.backend === "extension" ? extensionEntryState(entry) : entry.busy ? "busy" : "ready",
         pendingCommands: entry.backend === "extension" ? entry.terminalOperations.size : 0,
         drainingCommands: entry.backend === "extension" ? drainingExtensionCommandCount(entry) : 0,
+        ...(entry.backend === "puppeteer" && entry.videoInfo ? { video: { ...entry.videoInfo } } : {}),
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
     return {
@@ -1096,6 +1235,7 @@ export class BrowserManager implements BrowserManagerLike {
     const entry = this.#tabs.get(name);
     if (entry) {
       entry.pickAbort?.abort();
+      if (entry.backend === "puppeteer") { entry.videoAbort?.abort(); entry.presentationAbort?.abort(); }
       if (entry.backend === "extension") {
         entry.closed = true;
         entry.acceptingCommands = false;
@@ -1111,7 +1251,7 @@ export class BrowserManager implements BrowserManagerLike {
         if (this.#tabs.get(name) === entry) this.#tabs.delete(name);
       } else {
         this.#tabs.delete(name);
-        await disposeEntry(entry, cleanupIssues);
+        await this.#disposePuppeteer(entry, cleanupIssues);
       }
       return true;
     }
@@ -1126,6 +1266,7 @@ export class BrowserManager implements BrowserManagerLike {
     const entries = [...this.#tabs.values()];
     const openings = [...this.#opening.values()];
     const provisionalOwners = [...this.#provisionalExtensionOwners];
+    const disposals = [...this.#puppeteerDisposals];
     this.#lifecycle.abort();
     this.#lifecycle = new AbortController();
     for (const entry of entries) {
@@ -1142,6 +1283,7 @@ export class BrowserManager implements BrowserManagerLike {
     }
     for (const opening of openings) opening.abort();
     const outcomes = await Promise.allSettled([
+      ...disposals,
       ...entries.map((entry) => this.close(entry.name)),
       ...openings.map((opening) => opening.promise.catch((error) => { if (error instanceof AggregateError) throw error; })),
     ]);
@@ -1185,7 +1327,9 @@ export class BrowserManager implements BrowserManagerLike {
 
   #registerEntry(entry: TabEntry): void {
     if (entry.backend === "puppeteer") {
-      const discard = () => { void this.#discardEntry(entry); };
+      const discard = () => {
+        void this.#discardEntry(entry).catch((error) => console.warn(`[browser] Tab cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
+      };
       entry.page.once("close", discard);
       entry.browser.once("disconnected", discard);
     }
@@ -1196,7 +1340,15 @@ export class BrowserManager implements BrowserManagerLike {
     if (this.#tabs.get(entry.name) !== entry) return;
     entry.pickAbort?.abort();
     this.#tabs.delete(entry.name);
-    await disposeEntry(entry);
+    await this.#disposePuppeteer(entry);
+  }
+
+  #disposePuppeteer(entry: PuppeteerEntry, cleanupIssues?: string[]): Promise<void> {
+    const disposal = disposeEntry(entry, cleanupIssues);
+    this.#puppeteerDisposals.add(disposal);
+    const settled = () => { this.#puppeteerDisposals.delete(disposal); };
+    void disposal.then(settled, settled);
+    return disposal;
   }
 
   async #configureEntry(entry: TabEntry, options: BrowserOpenOptions, urlAlreadyApplied = false): Promise<void> {
@@ -2766,6 +2918,59 @@ async function disablePageRequestInterception(page: Page): Promise<void> {
   }
 }
 
+function trackChildVideoStart(entry: PuppeteerEntry, starting: Promise<void>): void {
+  const tracked = starting.then(() => {}, (error) => { entry.videoFailures?.push(error); }).finally(() => {
+    entry.videoStarts?.delete(tracked);
+  });
+  entry.videoStarts?.add(tracked);
+}
+
+async function startChildVideo(entry: PuppeteerEntry, page: Page): Promise<void> {
+  const config = entry.videoConfig;
+  if (!config || page === entry.page || page.isClosed()) return;
+  entry.videoPages.add(page);
+  const children = entry.videoChildren!;
+  const existing = children.get(page);
+  if (existing) { await existing; return; }
+  const parsed = path.parse(config.path);
+  const filename = path.join(parsed.dir, `${parsed.name}-${children.size + 2}${parsed.ext}`);
+  const pending = BrowserVideoRecording.start(createCdpVideoPage(page), config.cwd, { ...config.options, filename });
+  children.set(page, pending);
+  await pending;
+}
+
+function stopEntryVideo(entry: PuppeteerEntry): Promise<BrowserVideoInfo | undefined> {
+  if (entry.videoFinalizing) return entry.videoFinalizing;
+  if (entry.videoTargetListener) entry.browser.off("targetcreated", entry.videoTargetListener);
+  entry.videoTargetListener = undefined;
+  entry.videoConfig = undefined; // Fence admission before joining asynchronous page starts.
+  entry.videoAbort?.abort();
+  entry.videoAbort = undefined;
+  const pending = entry.video;
+  const finish = (async () => {
+    await Promise.all(entry.videoStarts ?? []);
+    const recordings = [...(pending ? [pending] : []), ...(entry.videoChildren?.values() ?? [])];
+    const outcomes = await Promise.allSettled(recordings.map(async (video) => (await video).stop()));
+    const failures = [...new Set([
+      ...(entry.videoFailures ?? []),
+      ...outcomes.flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []),
+    ])].filter((error) => !(error instanceof Error && error.name === "AbortError"));
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, "One or more browser videos failed to finalize.");
+    const videos = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+    const primary = videos[0];
+    return primary && { ...primary, ...(videos.length > 1 ? { videos } : {}) };
+  })().finally(() => {
+    if (entry.video === pending) { entry.video = undefined; entry.videoInfo = undefined; }
+    entry.videoChildren?.clear();
+    entry.videoStarts?.clear();
+    entry.videoFailures = undefined;
+    entry.videoFinalizing = undefined;
+  });
+  entry.videoFinalizing = finish;
+  return finish;
+}
+
 async function disposeEntry(entry: TabEntry, cleanupIssues?: string[]): Promise<void> {
   if (entry.backend === "extension") {
     let disposeError: unknown;
@@ -2791,6 +2996,16 @@ async function disposeEntry(entry: TabEntry, cleanupIssues?: string[]): Promise<
     if (disposeError) throw disposeError;
     return;
   }
+  entry.videoAbort?.abort();
+  let videoError: unknown;
+  entry.presentationAbort?.abort();
+  if (entry.presentationOperation) await Promise.allSettled([entry.presentationOperation]);
+  try { await entry.videoPresentation?.dispose(); }
+  catch (error) { videoError = error; }
+  if (entry.video || entry.videoFinalizing) {
+    try { await stopEntryVideo(entry); }
+    catch (error) { videoError = videoError ? new AggregateError([videoError, error], "Browser video cleanup failed.") : error; }
+  }
   if (!entry.ownedPage && !entry.page.isClosed()) cleanupIssues?.push("borrowed-page-execution-may-continue");
   try {
     if (entry.cdpSession && entry.cdpSession.connection() !== null
@@ -2803,6 +3018,7 @@ async function disposeEntry(entry: TabEntry, cleanupIssues?: string[]): Promise<
   await disposeBrowser(entry.browser, entry.owned, entry.profileDir);
   await Promise.allSettled([...entry.ownedTempFiles].map((file) => fs.rm(file, { force: true })));
   entry.ownedTempFiles.clear();
+  if (videoError) throw videoError;
 }
 
 async function disposeBrowser(browser: Browser, owned: boolean, profileDir?: string): Promise<void> {

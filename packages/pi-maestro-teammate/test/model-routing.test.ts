@@ -1508,12 +1508,19 @@ test("appendTaskTypeRoutingContext injects a concise, idempotent routing contrac
     assert.doesNotMatch(first, /Role guidance/);
     assert.doesNotMatch(first, /call-chain tracing \(ant, explorer, research\)/);
     assert.match(first, /Current task-type model routing:/);
-    assert.match(first, /^  - explore: model=/m);
+    assert.match(first, /^  - explore: model=auto, /m);
+    assert.doesNotMatch(first, /resolution priority|precedence|inherit[^\n]*parent model|Set `model`|selected role's model configuration/i);
 
-    // Re-injection replaces the previous block instead of appending a second one.
+    // Re-injection replaces the previous block and refreshes its table.
+    assert.equal(appendTaskTypeRoutingContext(first, root, agents, globalPath), first);
+    saveProjectModelMapping(root, "explore", "provider/explore", globalPath);
     const second = appendTaskTypeRoutingContext(first, root, agents, globalPath);
     assert.equal(second.match(/teammate-tasktype-routing:start/g)?.length, 1);
     assert.equal(second.match(/Legal task types/g)?.length, 1);
+    assert.equal(second.match(/Current task-type model routing:/g)?.length, 1);
+    assert.equal(second.match(/^  - explore: model=/gm)?.length, 1);
+    assert.match(second, /^  - explore: model=provider\/explore, /m);
+    assert.doesNotMatch(second, /^  - explore: model=auto, /m);
     assert.match(second, /^Base prompt/m);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -1527,6 +1534,9 @@ test("appendSmartModelSelectionContext injects distinct strategy and confirmatio
   assert.match(economy, /Economy strategy: prefer the lowest reference price/);
   assert.match(economy, /Preserve every user-explicit model/);
   assert.match(economy, /runtime confirmation overlay is enabled/);
+  assert.match(economy, /`teammate` tool description's omit-model rule/);
+  assert.match(economy, /that description remains authoritative for resolution precedence/);
+  assert.doesNotMatch(economy, /catalog default|Model resolution priority/);
   assert.doesNotMatch(economy, /OpenRouter|Artificial Analysis|benchmark_model_id/);
 
   const balanced = appendSmartModelSelectionContext(economy, "balanced", false);

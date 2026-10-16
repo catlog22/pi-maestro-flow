@@ -398,10 +398,10 @@ export function createCoordinatorFlowScheduleTool(
     name: "flow-schedule",
     label: "Flow Schedule",
     description:
-      "Monitor-only control surface for durably executing stable ordered steps in an already-managed workspace window. The Monitor creates and controls schedules; observe remains the lifecycle surface, teammate-send remains ad hoc messaging, workspace-window remains process ownership, and loop remains recurring work. A step advances only from an exact correlated worker report; Todo evidence is additional only for a negotiated Todo gate.",
-    promptSnippet: "Create and control durable ordered work for an existing managed workspace window.",
+      "Monitor-only control surface for durably executing stable ordered steps in an existing live, authorized workspace window. Use the full owner target after revalidation, not a completion resource, inbox history, or shortened ID. Create saves a draft without sending work; start requests admission, not proven dispatch or completion. The Monitor creates and controls schedules; monitor provides normalized lifecycle state/hooks, observe provides raw evidence and barriers, teammate-send remains ad hoc messaging, workspace-window remains process ownership, and loop remains recurring work. A step advances only from an exact correlated worker report; Todo evidence is additional only for a negotiated Todo gate. Scheduling does not authorize a new objective for an external peer or reopen/close a terminal.",
+    promptSnippet: "Create and control durable ordered work for an existing live, authorized workspace window.",
     promptGuidelines: [
-      "Use create then start; create never sends work.",
+      "Use create then start; create never sends work. Before either action, revalidate the full live owner target and its authorized scope. A completed task may leave an interactive worker live, but a headless completion resource is not a reusable endpoint. Do not use Flow to bypass a declined peer request.",
       "Use append with afterStepId. Cursor and wall-clock completion attribution are not supported.",
       "Queued or accepted delivery is not step completion. Use status to inspect transport, binding, and exact result evidence separately.",
       "todoBinding.requireCompleted and conflictCheck are opt-in per step and require the worker's flow-schedule-todo-binding capability. A capability mismatch intentionally degrades the dispatch: no Todo instruction or binding is created, and those gates are not enforced; status reports gate=none (not negotiated).",
@@ -409,7 +409,8 @@ export function createCoordinatorFlowScheduleTool(
       "Use observe view=todos for cross-process Todo visibility only; Todo projection alone is not completion authority.",
       "Use retry only after failed or ambiguous attempts; retry is the only action that creates a new dispatch attempt.",
       "Cancel stops scheduling but does not close or reclaim the target window.",
-      "If the target workspace worker is unreachable (window exited, peer discovery stale, or Monitor observation authority lost), admission defers: no dispatch is created and status reports an `Admit: deferred` line with the reason and attempt count. After several consecutive deferrals the schedule transitions to failed automatically; use status to diagnose, then resume with a live target.",
+      "If the target workspace worker is unreachable (window exited, peer discovery stale, or Monitor observation authority lost), admission defers: no dispatch is created and status reports an `Admit: deferred` line with the reason and attempt count. Start acknowledgement alone is not successful admission. After several consecutive deferrals the schedule transitions to failed automatically; inspect status and revalidate the exact owner before any authorized resume. Do not automatically create a replacement or reset the cumulative failure budget by renaming schedules or targets.",
+      "If inbox replies are queued during a tool call, end the turn to consume them instead of chaining wait/watch calls. Source fixes must be loaded through an authorized host reload before real-window verification; scheduling on the old host is not acceptance evidence.",
     ],
     parameters: FlowScheduleCoordinatorParams,
     async execute(_id, raw, signal, _onUpdate, ctx): Promise<FlowToolResult<FlowScheduleToolDetails>> {

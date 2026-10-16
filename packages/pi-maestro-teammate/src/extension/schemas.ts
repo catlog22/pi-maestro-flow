@@ -331,7 +331,7 @@ export const LocalTeammateListParams = Type.Object({
 export const TeammateSendParams = Type.Object({
   to: Type.String({
     description:
-      "Target teammate or root/peer session — root or @root for the dispatching root session; otherwise name, @name, displayed name#correlation-id-prefix, correlation ID (or prefix), owner:<ownerId> for a window, or owner:<ownerId>:<correlationId> for a remote agent",
+      "Target teammate or root/peer session — root or @root for the dispatching root session; local teammates accept name, @name, displayed name#correlation-id-prefix, or correlation ID/prefix. Workspace windows require the full owner:<ownerId>, and their agents use the full owner:<ownerId>:<correlationId> returned by discovery or an incoming sender address; never shorten a workspace owner ID.",
   }),
   message: Type.Optional(
     Type.String({
@@ -481,7 +481,7 @@ export const ObserveParams = Type.Object({
   targets: Type.Array(
     Type.Object({
       kind: Type.String({ minLength: 1, description: 'Observation provider kind, such as "teammate" or "bash_bg".' }),
-      id: Type.String({ minLength: 1, description: "Teammate targets use the correlation ID shown by teammate-list; full provider ids remain compatible." }),
+      id: Type.String({ minLength: 1, description: "Local teammate targets use their correlation ID; workspace targets use the full owner:<ownerId> from discovery (names are compatibility aliases, never owner-ID prefixes); remote targets use remote:<runId> from remote-worker. A routing target is not an agent:// completion resource." }),
       cursor: Type.Optional(Type.String({
         minLength: 1,
         maxLength: 2_048,
@@ -646,16 +646,20 @@ export const LocalObserveParams = Type.Unsafe<LocalObserveParamsInput>({
 // ---------------------------------------------------------------------------
 
 export const MonitorQueryParams = Type.Object({
-  action: Type.Unsafe<"list" | "get" | "wait">({
+  action: Type.Unsafe<"list" | "get" | "wait" | "subscribe" | "unsubscribe" | "subscriptions">({
     type: "string",
-    enum: ["list", "get", "wait"],
-    description: 'List normalized visible windows, get one exact window state, or wait on one window-domain condition.',
+    enum: ["list", "get", "wait", "subscribe", "unsubscribe", "subscriptions"],
+    description: 'List normalized visible windows, get one exact window state, wait on one window-domain condition, or subscribe/list/unsubscribe process-local lifecycle hooks.',
   }),
   target: Type.Optional(Type.String({
     minLength: 1,
     maxLength: 2_048,
-    description: "Exact owner/remote-window target returned by list. Required for get and wait.",
+    description: "Full exact owner/remote-window target returned by list, never an owner-ID prefix. Required for get, wait and subscribe; subscribe currently supports exact workspace owner windows only. Not-found/disconnected means endpoint unavailable, not proven terminal closure.",
   })),
+  subscriptionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Exact hook id returned by subscribe; required for unsubscribe. Check subscriptions before registering again; remove phase hooks when finished." })),
+  events: Type.Optional(Type.Array(Type.Unsafe<"running" | "settled" | "completed" | "failed" | "disconnected">({
+    type: "string", enum: ["running", "settled", "completed", "failed", "disconnected"],
+  }), { minItems: 1, maxItems: 5, uniqueItems: true, description: "Subscribe-only events. Default: settled, completed, failed, disconnected. Settled is not business success; completed requires exact work evidence." })),
   detail: Type.Optional(Type.Unsafe<"summary" | "full">({
     type: "string",
     enum: ["summary", "full"],
@@ -671,7 +675,7 @@ export const MonitorQueryParams = Type.Object({
     type: "string",
     enum: ["change", "attention", "settled"],
     default: "change",
-    description: "Wait-only window condition: semantic change, attention, or settled lifecycle/completion.",
+    description: "Wait-only window condition: semantic change, attention, or settled lifecycle/completion. Settled is not business success and no condition proves physical terminal closure. For deferred workspace completion prefer subscribe, then end the turn.",
   })),
   timeoutMs: Type.Optional(Type.Integer({
     minimum: 1,
@@ -682,8 +686,13 @@ export const MonitorQueryParams = Type.Object({
 }, {
   additionalProperties: false,
   allOf: [
+    { if: { properties: { action: { const: "unsubscribe" } }, required: ["action"] }, then: { required: ["subscriptionId"] } },
+    { if: { required: ["subscriptionId"] }, then: { properties: { action: { const: "unsubscribe" } } } },
+    { if: { required: ["events"] }, then: { properties: { action: { const: "subscribe" } } } },
+    { if: { properties: { action: { enum: ["unsubscribe", "subscriptions"] } }, required: ["action"] }, then: { not: { anyOf: ["target", "detail", "cursor", "until", "timeoutMs", "events"].map((field) => ({ required: [field] })) } } },
+    { if: { properties: { action: { const: "subscribe" } }, required: ["action"] }, then: { not: { anyOf: ["detail", "cursor", "until", "timeoutMs"].map((field) => ({ required: [field] })) } } },
     {
-      if: { properties: { action: { enum: ["get", "wait"] } }, required: ["action"] },
+      if: { properties: { action: { enum: ["get", "wait", "subscribe"] } }, required: ["action"] },
       then: { required: ["target"] },
     },
     {
@@ -768,7 +777,7 @@ export const WorkspaceWindowParams = Type.Object({
   action: Type.Unsafe<"create" | "list" | "close">({
     type: "string",
     enum: ["create", "list", "close"],
-    description: "Create, list, or close worker windows owned by the active Monitor session. Create returns an optional canonical completion handle whose agent:// resource remains readable after exit; close finalizes pending work as cancelled.",
+    description: "Create, list, or explicitly close worker windows owned by the active Monitor session. Create delivers objective once and returns a full owner target plus optional immutable agent:// completion handle. Completion does not close interactive windows; close is a separate authorized call and finalizes pending work as cancelled.",
   }),
   name: Type.Optional(Type.String({
     minLength: 1,
@@ -778,7 +787,7 @@ export const WorkspaceWindowParams = Type.Object({
   })),
   objective: Type.Optional(Type.String({
     minLength: 1,
-    description: "Task objective passed to the new Pi worker. Required for create.",
+    description: "User-authorized task passed once to the new Pi worker. Required for create. Include owned scope, constraints, acceptance criteria and available exact human-source evidence; do not manufacture approval or resend after create.",
   })),
   provider: Type.Optional(Type.Unsafe<"native" | "herdr">({
     type: "string",
@@ -797,7 +806,7 @@ export const WorkspaceWindowParams = Type.Object({
     type: "string",
     enum: ["interactive", "headless"],
     default: "interactive",
-    description: "Open a visible interactive terminal by default; use headless only with the native provider when no terminal UI is needed.",
+    description: "Interactive (default) opens a visible terminal that remains open after task completion until a separate authorized close. Native-only headless needs no terminal UI and stops after canonical result publication. Do not switch presentation merely to retry an ambiguous startup/result.",
   })),
 }, {
   additionalProperties: false,

@@ -442,7 +442,12 @@ test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a r
 	assert.match(flowSource, /pi\.events\.on\(BASH_BG_QUERY_EVENT, publishSnapshot\)/);
 	assert.match(cockpitSource, /pi\.events\.on\(BASH_BG_UPDATE_EVENT/);
 	assert.match(cockpitSource, /pi\.events\.emit\(BASH_BG_QUERY_EVENT/);
-	assert.doesNotMatch(cockpitSource, /renderBashBgSummary|bashBgStatus/);
+	const footerSource = sourceSection(cockpitSource, "ctx.ui.setFooter((tui, theme, footerData)", "// Install first in aboveEditor order");
+	assert.match(footerSource, /const bashBgStatus = renderBashBgSummary\(\s*bashBg\.snapshot\(\)/);
+	assert.match(footerSource, /Math\.max\(1, width - 1\)/);
+	assert.match(footerSource, /hideLiveDuration: config\.staticMode/);
+	assert.match(footerSource, /const footerKey = \[[\s\S]*?bashBgStatus \?\? ""/);
+	assert.match(footerSource, /renderFooter\(\{[\s\S]*?bashBgStatus,/);
 	assert.match(cockpitSource, /registerShortcut\(BASH_BG_OVERLAY_KEY/);
 });
 

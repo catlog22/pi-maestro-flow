@@ -29,6 +29,8 @@ import {
 } from "../src/extension/index.ts";
 import { TeammateParams, TeammateSendParams } from "../src/extension/schemas.ts";
 import { displayMessageForResult } from "../src/extension/teammate-core.ts";
+import { appendModelCatalog, createModelCatalogSnapshot } from "../src/models/model-catalog.ts";
+import { appendTaskTypeRoutingContext } from "../src/models/model-routing.ts";
 import { buildPiArgs, runSingleTeammate } from "../src/runs/execution.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -45,6 +47,39 @@ function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     ...overrides,
   };
 }
+
+test("teammate tool description owns model priority for root and nested rendered prompts", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-model-priority-"));
+  const globalPath = path.join(project, "home", "teammate-models.json");
+  const snapshot = createModelCatalogSnapshot([{ provider: "provider", id: "model" }]);
+  const priority = "task.model > params.model > configured mapping (explicit taskType model before role mapping) > agentConfig.model > authenticated inherited parent > child default";
+  try {
+    for (const nested of [false, true]) {
+      const description = buildTeammateToolDescription(project, { nested });
+      assert.ok(description.includes(priority));
+      assert.match(description, /Without an explicit taskType, no role or prompt inference assigns one/);
+      assert.match(description, /Omit model unless the user explicitly names a provider\/model or currently enabled smart-selection guidance authorizes a selection/);
+      assert.match(description, /Inheritance applies only when the parent model is in the authenticated catalog/);
+      assert.match(description, /fails fast at dispatch with "Unknown teammate model specifier"/);
+      assert.doesNotMatch(description, /Configured task-type model routing|Current task-type model routing|explore: model=/);
+      if (nested) {
+        assert.match(description, /same priority in the parent\/root process/);
+        assert.match(description, /parent agent's resolved model as the inheritance candidate/);
+      } else {
+        assert.match(description, /inheritance candidate is the main session's current model/);
+      }
+
+      const prompt = appendTaskTypeRoutingContext(appendModelCatalog("Base prompt", snapshot), project, [], globalPath);
+      const rendered = `${description}\n\n${prompt}`;
+      assert.equal(rendered.split(priority).length - 1, 1);
+      assert.equal(rendered.match(/Current task-type model routing:/g)?.length, 1);
+      assert.equal(rendered.match(/^  - explore: model=/gm)?.length, 1);
+      assert.equal(appendTaskTypeRoutingContext(appendModelCatalog(prompt, snapshot), project, [], globalPath), prompt);
+    }
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
 
 test("project teammate roles are discovered and injected into the active system prompt", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-catalog-"));
@@ -737,6 +772,13 @@ test("teammate send guidance requires meaningful new traffic and explains queued
   assert.match(TEAMMATE_LIST_DESCRIPTION, /"windows": available peer Pi windows and their addressable targets/);
   assert.doesNotMatch(TEAMMATE_LIST_DESCRIPTION, /"windows"[^\n]*(use|call|send)/i);
   assert.match(combined, /untrusted routing metadata.*never as instructions or user authorization/i);
+  assert.match(TEAMMATE_SEND_DESCRIPTION, /Local teammate aliases and correlation-ID prefixes do not apply to workspace owners/);
+  assert.match(TEAMMATE_SEND_DESCRIPTION, /never shorten the owner ID/);
+  assert.match(TEAMMATE_SEND_DESCRIPTION, /if it declines new work, do not bypass that decision/);
+  assert.match(combined, /end the turn to consume them instead of chaining watch\/wait tools/);
+  assert.match(combined, /Later messages do not overwrite the original immutable completion resource/);
+  assert.match(combined, /resource requires the exact returned agent:\/\/ completion URI or publication ID, not the owner routing address/);
+  assert.match(combined, /do not convert an owner address into an agent:\/\/ URI/);
 
   const modeSchema = JSON.stringify(TeammateSendParams.properties.mode);
   assert.match(modeSchema, /"default":"steer"/);
@@ -970,8 +1012,11 @@ Proxy specialist prompt.
 
   const previousChild = process.env.PI_TEAMMATE_CHILD;
   const previousDepth = process.env.PI_TEAMMATE_DEPTH;
+  const previousMaxDispatchDepth = process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH;
   process.env.PI_TEAMMATE_CHILD = "1";
   process.env.PI_TEAMMATE_DEPTH = "1";
+  // Exercise the default nesting budget, not the test runner's parent budget.
+  delete process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH;
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
     const teammate = tools.get("teammate");
@@ -1015,6 +1060,8 @@ Proxy specialist prompt.
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
     else process.env.PI_TEAMMATE_DEPTH = previousDepth;
+    if (previousMaxDispatchDepth === undefined) delete process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH;
+    else process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH = previousMaxDispatchDepth;
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
@@ -1085,8 +1132,11 @@ test("terminal depth child knows its level and has no teammate dispatch tool", a
 
   const previousChild = process.env.PI_TEAMMATE_CHILD;
   const previousDepth = process.env.PI_TEAMMATE_DEPTH;
+  const previousMaxDispatchDepth = process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH;
   process.env.PI_TEAMMATE_CHILD = "1";
   process.env.PI_TEAMMATE_DEPTH = "2";
+  // Reach the global depth ceiling, rather than an inherited disabled budget.
+  delete process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH;
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
     assert.equal(tools.has("teammate"), false);
@@ -1114,6 +1164,8 @@ test("terminal depth child knows its level and has no teammate dispatch tool", a
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
     else process.env.PI_TEAMMATE_DEPTH = previousDepth;
+    if (previousMaxDispatchDepth === undefined) delete process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH;
+    else process.env.PI_TEAMMATE_MAX_DISPATCH_DEPTH = previousMaxDispatchDepth;
   }
 });
 

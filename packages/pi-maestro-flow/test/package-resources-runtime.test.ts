@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   configureTeammateAgentsDiscovery,
   loadBundledAgentsInstructions,
+  registerMaestroPackageResources,
   resolveBundledAgentsPath,
   resolvePackageOrWorkspaceResource,
 } from "../src/resources/maestro-package.ts";
@@ -80,11 +82,45 @@ test("prefers .pi/SYSTEM.md over AGENTS.md when both exist", () => {
   }
 });
 
+for (const relative of [".pi/SYSTEM.md", "AGENTS.md"]) {
+  test(`injects an explicit instruction directory for ${relative}`, () => {
+    const root = join(tmpdir(), `pi-maestro-instruction-directory-${process.pid}-${Date.now()}`);
+    const packageJson = join(root, "package.json");
+    const sourcePath = join(root, relative);
+    const directory = dirname(sourcePath);
+    const instructions = "# Instructions\n\nRead [Architecture](instructions/architecture.md).";
+    mkdirSync(join(directory, "instructions"), { recursive: true });
+    writeFileSync(packageJson, "{}\n", "utf8");
+    writeFileSync(sourcePath, instructions, "utf8");
+    writeFileSync(join(directory, "instructions", "architecture.md"), "# Deferred architecture content\n", "utf8");
+    let beforeAgentStart: ((event: { systemPrompt: string }) => { systemPrompt: string }) | undefined;
+    const pi = {
+      on(event: string, handler: typeof beforeAgentStart) {
+        assert.equal(event, "before_agent_start");
+        beforeAgentStart = handler;
+      },
+    } as unknown as ExtensionAPI;
+
+    try {
+      registerMaestroPackageResources(pi, packageJson);
+      assert.ok(beforeAgentStart);
+      const { systemPrompt } = beforeAgentStart({ systemPrompt: "Existing system prompt" });
+      assert.equal(systemPrompt, `Existing system prompt\n\n<project_instructions path="${sourcePath.replaceAll("\\", "/")}" directory="${directory.replaceAll("\\", "/")}">\n${instructions}\n</project_instructions>`);
+      assert.notEqual(directory, process.cwd(), "package references must not use the consumer's cwd");
+      assert.doesNotMatch(systemPrompt, /Deferred architecture content/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("canonical SYSTEM delegates knowledge closeout without granting implicit publication", () => {
   const sourcePath = fileURLToPath(new URL("../../../.pi/SYSTEM.md", import.meta.url));
   const instructions = loadBundledAgentsInstructions(sourcePath);
   assert.ok(instructions);
-  const knowledge = instructions.split("## Run Knowledge")[1]?.split("# Execution Order")[0];
+  assert.match(instructions, /Before capture.*load \[Knowledge instructions\]\(instructions\/knowledge\.md\)/);
+  const reference = loadBundledAgentsInstructions(join(dirname(sourcePath), "instructions", "knowledge.md"));
+  const knowledge = reference?.split("## Run Knowledge")[1];
   assert.ok(knowledge);
   assert.match(knowledge, /Read @~\/\.maestro\/ref\/knowledge-closeout\.md explicitly before closeout/);
   assert.match(knowledge, /completion owner/);
@@ -96,6 +132,43 @@ test("canonical SYSTEM delegates knowledge closeout without granting implicit pu
   assert.match(knowledge, /fresh session receipt.*not Session completion/);
   assert.match(knowledge, /do not block otherwise valid completion/);
   assert.doesNotMatch(knowledge, /-y.*auto-adjudication is allowed|sealed Session \+ fresh session receipt/);
+});
+
+test("canonical SYSTEM keeps specialized instructions discoverable without eager injection", () => {
+  const sourcePath = fileURLToPath(new URL("../../../.pi/SYSTEM.md", import.meta.url));
+  const instructions = loadBundledAgentsInstructions(sourcePath)!;
+  assert.ok(Buffer.byteLength(instructions, "utf8") < 24_000, "routine instructions must not regain the full specialized workflows");
+  assert.equal(instructions.match(/^# Project Knowledge Gate$/gm)?.length, 1);
+  assert.match(instructions, /Read the matching reference before its first relevant operation; do not preload unrelated modules/);
+  assert.match(instructions, /Paths are relative to this SYSTEM\.md/);
+  assert.match(instructions, /never the current working directory/);
+  assert.match(instructions, /<project_instructions directory="…">/);
+  assert.match(instructions, /<project_instructions path="…">.*parent directory is the base/);
+  assert.match(instructions, /Markdown links do not load it automatically/);
+  assert.match(instructions, /Only a live human Plan-auto grant can bypass confirmation/);
+  assert.match(instructions, /Plan mode is read-only/);
+  assert.match(instructions, /do not create a gate|does not create a gate/);
+  assert.match(instructions, /Goal\/Todo mechanics.*tool contracts/);
+  assert.match(instructions, /teammate tool owns model selection\/precedence/);
+  for (const name of ["plan", "review", "knowledge", "architecture"]) {
+    const relative = `instructions/${name}.md`;
+    const label = `${name[0].toUpperCase()}${name.slice(1)} instructions`;
+    assert.ok(instructions.includes(`[${label}](${relative})`), `${name} must have a linked load trigger`);
+    assert.equal(instructions.includes(`\`${relative}\``), false, `${name} references must use Markdown links`);
+    const reference = loadBundledAgentsInstructions(join(dirname(sourcePath), relative));
+    assert.ok(reference, `${name} must resolve alongside SYSTEM.md`);
+    assert.equal(instructions.includes(reference), false, `${name} must not be eagerly embedded`);
+  }
+  assert.doesNotMatch(instructions, /--transcript-quote|maestro arch-kb show|plan-enter` -> research|Soft limit: when the same subsystem/);
+  const plan = loadBundledAgentsInstructions(join(dirname(sourcePath), "instructions", "plan.md"))!;
+  assert.match(plan, /Plan-auto defaults off and is host-memory-only/);
+  assert.match(plan, /Machine ask `decisions`.*never human `answers` or approvals/);
+  const review = loadBundledAgentsInstructions(join(dirname(sourcePath), "instructions", "review.md"))!;
+  assert.match(review, /same subsystem reaches 2 correction gates/);
+  assert.match(review, /reaches 3 review rounds without convergence/);
+  const knowledge = loadBundledAgentsInstructions(join(dirname(sourcePath), "instructions", "knowledge.md"))!;
+  assert.match(knowledge, /untrusted snapshot evidence only/);
+  assert.match(knowledge, /Never bypass the gate by editing evidence refs/);
 });
 
 test("canonical SYSTEM keeps delivery gates justified and correction budgets cumulative", () => {

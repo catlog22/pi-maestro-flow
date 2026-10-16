@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { MonitorQueryParams, ObserveParams, TeammateSendParams, WorkspaceWindowParams } from "../src/extension/schemas.ts";
+import { OBSERVE_DESCRIPTION, OBSERVE_GUIDELINES } from "../src/extension/teammate-core.ts";
 import {
   barrierWait,
   activePromptLoopIdsFromPayload,
@@ -33,6 +35,12 @@ function snap(name: string, agentStatus: string, idle = 5): MonitorTargetSnapsho
 
 function notFound(name: string): MonitorTargetSnapshot {
   return { name, found: false, error: "not found", summary: "" };
+}
+
+// TypeBox's inferred schema types omit annotation fields; check runtime metadata.
+function schemaDescription(schema: object): string {
+  assert.ok("description" in schema && typeof schema.description === "string");
+  return schema.description;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +247,7 @@ test("monitor mode context is persistent, structured, idempotent, and supervisio
     "## Role and authority",
     "## Complete-project orchestration",
     "## Tool routing",
+    "## Execution lifecycle",
     "## Recurring supervision",
     "## Message timing and exit",
   ];
@@ -274,14 +283,74 @@ test("monitor mode context is persistent, structured, idempotent, and supervisio
   assert.match(injected, /flow-schedule create then start/);
   assert.match(injected, /exact correlated Flow report remains completion authority/);
 
-  assert.match(injected, /deferred condition followed by an action/);
-  assert.match(injected, /one bounded prompt loop for the complete phase, never one loop per target and never a shell loop/);
-  assert.match(injected, /revalidate the exact owner after every await before intervening/);
-  assert.match(injected, /cancel the current loop, and only then delegate an explicitly authorized non-idempotent action exactly once/);
+  assert.match(injected, /For deferred completion, freeze the exact current-phase targets/);
+  assert.match(injected, /monitor subscribe per required workspace owner/);
+  assert.match(injected, /monitor subscriptions lists hooks and monitor unsubscribe removes them/);
+  assert.match(injected, /default intervalMs=300000 \(5 minutes\)/);
+  assert.match(injected, /shorter intervals require an explicit user requirement or concrete latency reason/);
+  assert.match(injected, /Derive maxRuns from the bounded remaining horizon/);
+  assert.match(injected, /no-change ticks must not send routine broadcasts/);
+  assert.match(injected, /revalidate the exact owner after every await/);
+  assert.match(injected, /unsubscribe phase hooks, then delegate an explicitly authorized non-idempotent action exactly once/);
+  assert.match(injected, /settled notification .* proves only lifecycle settlement, never business success/);
   assert.match(injected, /queued until the next turn boundary/);
   assert.match(injected, /\/monitor exit does not stop them/);
 
   assert.equal(appendMonitorModeContext(injected), injected);
+});
+
+test("monitor workflow separates authorization, live targeting, results, and explicit closure", () => {
+  const injected = appendMonitorModeContext("base prompt");
+  assert.match(injected, /Reuse only live workers whose authorized scope covers the work/);
+  assert.match(injected, /peer request does not grant human authorization/);
+  assert.match(injected, /do not pressure it or relabel the request as coordination/);
+  assert.match(injected, /bounded task, use one authorized worker without a project-planning detour/);
+  assert.match(injected, /full owner:<ownerId>/);
+  assert.match(injected, /local teammate name\/prefix aliases do not apply to workspace owners/);
+  assert.match(injected, /Create saves a draft, start requests admission/);
+  assert.match(injected, /never use Flow to bypass a declined peer request or revive a dead window/);
+  assert.match(injected, /failed result does not prove the window closed/);
+  assert.match(injected, /disconnected means the exact endpoint is unavailable, not proven process exit/);
+  assert.match(injected, /terminal launcher exiting is not the authenticated interactive worker exiting/);
+  assert.match(injected, /Later messages or another turn cannot overwrite that original result/);
+  assert.match(injected, /Task completion leaves interactive windows open/);
+  assert.match(injected, /separate explicit workspace-window close/);
+  assert.match(injected, /headless workers are automatically stopped after canonical result publication/);
+  assert.match(injected, /Admission rollback and host shutdown remain separate safety cleanup paths/);
+  assert.match(injected, /changing worker, presentation, or schedule does not reset it/);
+  assert.match(injected, /obtain permission for reload\/restart before real-window verification/);
+  assert.match(injected, /reuse an existing matching hook instead of stacking duplicates/);
+  assert.match(injected, /After registration, end the turn to receive notifications/);
+  assert.match(injected, /stop chaining wait\/watch calls and end the turn to consume them/);
+});
+
+test("Monitor workflow descriptors agree on exact targets, waiting, and interactive lifetime", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const monitorTool = source.slice(source.indexOf('name: "monitor"'), source.indexOf("const monitorTool:"));
+  const windowTool = source.slice(source.indexOf("const workspaceWindowTool:"), source.indexOf("interface RemoteWorkerToolParams"));
+  assert.match(monitorTool, /settled is not success, failed is not proof of process exit/);
+  assert.match(monitorTool, /prefer subscribe[\s\S]*?end the turn/);
+  assert.match(monitorTool, /Check subscriptions before registering again/);
+  assert.match(windowTool, /task completion keeps the window open/);
+  assert.match(windowTool, /separate explicit close call with its retained name/);
+  assert.match(windowTool, /Headless worker stops automatically after canonical result publication/);
+  assert.match(windowTool, /Objective delivered once; do not resend it/);
+  assert.match(windowTool, /Later turns cannot overwrite that resource/);
+  assert.match(windowTool, /Admission rollback and host shutdown retain their safety cleanup paths/);
+  assert.match(source, /Workspace target[\s\S]*?Use the full owner:<ownerId>[\s\S]*?not-found is not proof that the physical window closed/);
+
+  assert.match(schemaDescription(TeammateSendParams.properties.to), /never shorten a workspace owner ID/);
+  assert.match(schemaDescription(ObserveParams.properties.targets.items.properties.id), /workspace targets use the full owner:<ownerId>/);
+  assert.match(schemaDescription(ObserveParams.properties.targets.items.properties.id), /routing target is not an agent:\/\/ completion resource/);
+  assert.match(schemaDescription(MonitorQueryParams.properties.target), /never an owner-ID prefix/);
+  assert.match(schemaDescription(MonitorQueryParams.properties.until), /Settled is not business success/);
+  assert.match(schemaDescription(WorkspaceWindowParams.properties.presentation), /remains open after task completion/);
+  assert.match(schemaDescription(WorkspaceWindowParams.properties.objective), /do not manufacture approval or resend/);
+  const observation = [OBSERVE_DESCRIPTION, ...OBSERVE_GUIDELINES].join("\n");
+  assert.match(observation, /prefer monitor list\/get/);
+  assert.match(observation, /End the turn when inbox replies are queued/);
+  assert.match(observation, /never an owner-ID prefix/);
+  assert.match(observation, /until=completed does not close an interactive window/);
 });
 
 test("monitor mode context can be removed without disturbing surrounding prompt content", () => {

@@ -82,6 +82,8 @@ import {
   type MonitorQuerySnapshot,
   type MonitorQueryTimelineGroup,
 } from "./monitor.ts";
+import { MonitorWindowSubscriptions } from "./monitor-window-subscriptions.ts";
+import { WorkspaceRootDelivery, workspaceRootMessageMode } from "./workspace-root-delivery.ts";
 import {
   createBackgroundStatusHeartbeatForHost,
   supportsNativeCacheWarming,
@@ -166,11 +168,9 @@ import {
   discoverWorkspacePeers,
   encodeWorkspaceWindowTerminalResult,
   enqueueWorkspacePeerCommand,
-  finalizeWorkspacePeerResponse,
   formatWorkspacePeerWindowListings,
   formatWorkspaceRemoteRootMessage,
   projectWorkspacePeerWindow,
-  readWorkspacePeerResponse,
   resolveWorkspaceOwnerByName,
   resolveWorkspaceTarget,
   shouldReplayWorkspaceRootQueue,
@@ -2047,17 +2047,17 @@ export default function registerTeammateExtension(
 
   /**
    * Canonical envelope for re-injecting a persisted incoming root message
-   * (session-start replay and stale-queued re-drive). `details.mode` must
+   * (actual session/process recovery only). `details.mode` must
    * survive so message_end can finalize the thread entry and sender receipt.
    */
   const workspaceRootMessageEnvelope = (
     entry: WindowThreadEntry,
-    options: { replayed?: boolean; redriven?: boolean } = {},
+    options: { replayed?: boolean; deliveryToken: string },
   ) => {
     // Window-thread entries only ever record cross-window steer/follow_up;
     // interrupt is local-only and never persisted here, but the union widened
     // with SessionMessageMode, so narrow defensively.
-    const effectiveAction: "steer" | "follow_up" = entry.effectiveMode === "steer" ? "steer" : "follow_up";
+    const effectiveAction = workspaceRootMessageMode(entry);
     return {
       envelope: {
         customType: "teammate-message",
@@ -2077,17 +2077,19 @@ export default function registerTeammateExtension(
           source: "workspace-peer",
           messageId: entry.messageId,
           fromOwnerId: entry.peerOwnerId,
+          fromOwnerNonce: entry.peerOwnerNonce,
+          localOwnerNonce: entry.localOwnerNonce,
+          deliveryToken: options.deliveryToken,
           requestedMode: entry.mode,
           mode: effectiveAction,
           ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
-          provenance: normalizeMessageProvenanceV1(entry.provenance, {
+          provenance: provenanceWithDeliveryMode(normalizeMessageProvenanceV1(entry.provenance, {
             from: entry.fromSessionName ?? `owner-${entry.peerOwnerId.slice(0, 8)}`,
             messageId: entry.messageId,
             messageKind: entry.messageKind ?? "message",
-            deliveryMode: effectiveAction,
-          }),
+            deliveryMode: entry.mode,
+          }), effectiveAction),
           ...(options.replayed ? { replayed: true } : {}),
-          ...(options.redriven ? { redriven: true } : {}),
         },
       },
       effectiveAction,
@@ -2108,70 +2110,29 @@ export default function registerTeammateExtension(
         || entry.workspaceId !== workspaceId
         || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
         || !shouldReplayWorkspaceRootQueue(reason, entry.targetSessionId, currentSessionId)) continue;
-      // Replay now matches redrive's per-message cap (QUEUED_ROOT_REDRIVE_MAX)
-      // to prevent unbounded replay on repeated restart.
-      const replayCount = replayedIncoming.get(entry.messageId) ?? 0;
-      if (replayCount >= QUEUED_ROOT_REDRIVE_MAX) continue;
-      replayedIncoming.set(entry.messageId, replayCount + 1);
-      const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { replayed: true });
-      const replayTriggerTurn = sessionMessageTriggersTurn(entry.messageKind);
-      const delivered = safeSendMessage(pi, envelope, {
-        triggerTurn: replayTriggerTurn,
-        deliverAs: "followUp",
+      workspaceRootDelivery.enqueue(entry, (deliveryToken) => {
+        const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { replayed: true, deliveryToken });
+        const delivered = safeSendMessage(pi, envelope, {
+          triggerTurn: sessionMessageTriggersTurn(entry.messageKind),
+          deliverAs: effectiveAction === "steer" ? "steer" : "followUp",
+        });
+        return delivered;
       });
-      if (!delivered) registry.thread.transition(entry.messageId, "incoming", "rejected", Date.now(), effectiveAction);
-      else if (!replayTriggerTurn) registry.thread.transition(entry.messageId, "incoming", "injected", Date.now(), effectiveAction);
     }
   };
 
-  const QUEUED_ROOT_REDRIVE_DELAY_MS = 60_000;
-  const QUEUED_ROOT_REDRIVE_COOLDOWN_MS = 60_000;
-  const QUEUED_ROOT_REDRIVE_MAX = 2;
-  const redrivenIncoming = new Map<string, { count: number; at: number }>();
-  const replayedIncoming = new Map<string, number>();
-
-  /**
-   * Delivery recovery for accepted-but-never-injected root messages. The pi
-   * host can drop a followUp/triggerTurn send (aborted turns, cleared follow-up
-   * queues, run-state races), leaving the thread entry and the sender receipt
-   * at "queued" forever. Re-drive stale entries with a bounded per-message
-   * budget; message_end finalizes the entry and receipt once the message
-   * actually lands.
-   */
-  const redriveStaleIncomingRootMessages = (): void => {
-    const registry = sessionHostRegistry;
-    if (!registry) return;
-    const fence = captureRootSessionFence();
-    if (!ownsRootSessionFence(fence)) return;
-    const workspaceId = workspaceIdForCwd(state.baseCwd);
-    const now = Date.now();
-    for (const entry of registry.thread.list()) {
-      if (entry.direction !== "incoming"
-        || entry.status !== "queued"
-        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
-        || entry.workspaceId !== workspaceId
-        || entry.updatedAt > now - QUEUED_ROOT_REDRIVE_DELAY_MS) continue;
-      const previous = redrivenIncoming.get(entry.messageId);
-      if (previous
-        && (previous.count >= QUEUED_ROOT_REDRIVE_MAX
-          || now - previous.at < QUEUED_ROOT_REDRIVE_COOLDOWN_MS)) continue;
-      const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { redriven: true });
-      const redriveTriggerTurn = sessionMessageTriggersTurn(entry.messageKind);
-      const delivered = safeSendMessage(pi, envelope, {
-        triggerTurn: redriveTriggerTurn,
-        deliverAs: effectiveAction === "steer" ? "steer" : "followUp",
-      });
-      if (!delivered) continue;
-      redrivenIncoming.set(entry.messageId, { count: (previous?.count ?? 0) + 1, at: now });
-      registry.thread.transition(
-        entry.messageId,
-        "incoming",
-        redriveTriggerTurn ? "queued" : "injected",
-        now,
-        effectiveAction,
-      );
-    }
-  };
+  const workspaceRootDelivery = new WorkspaceRootDelivery({
+    thread: () => sessionHostRegistry?.thread,
+    sessionEntries: () => widgetCtx?.sessionManager?.getEntries?.() ?? [],
+    authority: () => {
+      const publisher = workspacePeerPublisher;
+      const fence = workspacePeerPublisherFence;
+      if (!publisher || !fence || !ownsRootSessionFence(fence)) return undefined;
+      return { identity: publisher.identity, sessionId: fence.sessionId,
+        key: `${state.sessionGeneration}:${workspacePeerGeneration}:${publisher.identity.ownerId}:${publisher.identity.ownerNonce}` };
+    },
+    onError: (error) => logDiagnosticWarn("[pi-maestro-teammate] workspace delivery reconciliation failed:", error),
+  });
 
   const refreshSessionEndpointDirectory = (includeUnboundLocal = false): void => {
     const registry = sessionHostRegistry;
@@ -2564,7 +2525,7 @@ export default function registerTeammateExtension(
       target = resolveWorkspacePeerSendTarget(query);
     }
     if (!target) {
-      return { delivered: false, error: `Workspace target "${query}" was not found. Use teammate-list with view=windows in Monitor mode, or the sender address from a received workspace message.` };
+      return { delivered: false, error: `Workspace target "${query}" was not found. Use the full owner:<ownerId> from monitor list or teammate-list view=windows in Monitor mode, or the full sender address from a received workspace message. Revalidate once; not-found is not proof that the physical window closed.` };
     }
     if (target.state !== "active") {
       return { delivered: false, error: `Workspace target "${query}" is settled and cannot receive commands.` };
@@ -2639,6 +2600,7 @@ export default function registerTeammateExtension(
             workspaceId: prepared.workspaceId,
             peerOwnerId: prepared.toOwnerId,
             peerOwnerNonce: prepared.toOwnerNonce,
+            localOwnerNonce: prepared.fromOwnerNonce,
             direction: "outgoing",
             source,
             ...(prepared.messageKind === undefined ? {} : { messageKind: prepared.messageKind }),
@@ -2679,7 +2641,7 @@ export default function registerTeammateExtension(
         if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
         registry.thread.record({
           ...publishedOutgoing,
-          status: "timeout",
+          status: "pending",
           updatedAt: Math.max(command.createdAt, Date.now()),
         });
         return {
@@ -2691,13 +2653,14 @@ export default function registerTeammateExtension(
       if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
       const effectiveMode = response?.effectiveAction ?? mode;
       const deliveryStage = response?.deliveryStage ?? "queued";
-      const status: WindowThreadStatus = !response || response.status === "expired"
+      const status: WindowThreadStatus = !response ? "pending" : response.status === "expired"
         ? "timeout"
         : response.status === "accepted" ? deliveryStage : "rejected";
       if (response?.status === "accepted") publicationStage = "accepted";
       else if (response && response.status !== "expired") publicationStage = "rejected";
       registry.thread.record({
         ...publishedOutgoing,
+        ...(response === undefined ? {} : { receiptStatus: response.status }),
         effectiveMode,
         status,
         updatedAt: Math.max(command.createdAt, response?.respondedAt ?? Date.now()),
@@ -3975,43 +3938,14 @@ export default function registerTeammateExtension(
   };
 
   const RECONCILE_RECEIPT_INTERVAL_MS = 5_000;
-  const RECONCILE_RECEIPT_MAX_AGE_MS = 10 * 60_000;
-  const RECONCILE_RECEIPT_SKIP_AFTER_MS = 2_000;
+  // A bounded send wait is observational. Actual receipts (including late ones)
+  // are reconciled by the same queue/consumption coordinator; no age-based failure.
+  const reconcileWorkspacePeerReceipts = (): Promise<void> => workspaceRootDelivery.reconcile();
 
-  /**
-   * Background receipt reconciliation: keeps polling response files for
-   * non-terminal outgoing journal entries so a receipt that finalizes after
-   * the synchronous 5s send window (target-side injection) still lands as
-   * outgoing/injected (or rejected/timeout) instead of freezing at queued.
-   */
-  const reconcileWorkspacePeerReceipts = async (): Promise<void> => {
-    const publisher = workspacePeerPublisher;
-    const registry = sessionHostRegistry;
-    if (!publisher || !registry) return;
-    const now = Date.now();
-    for (const entry of registry.thread.list()) {
-      if (entry.direction !== "outgoing"
-        || (entry.status !== "pending" && entry.status !== "queued")) continue;
-      // Skip entries still inside the synchronous send window.
-      if (entry.updatedAt > now - RECONCILE_RECEIPT_SKIP_AFTER_MS) continue;
-      if (now - entry.updatedAt > RECONCILE_RECEIPT_MAX_AGE_MS) {
-        registry.thread.transition(entry.messageId, "outgoing", "timeout", now);
-        continue;
-      }
-      const response = await readWorkspacePeerResponse(publisher.identity, entry.messageId).catch(() => undefined);
-      if (!response) continue;
-      if (response.status === "accepted" && response.deliveryStage === "injected") {
-        registry.thread.transition(entry.messageId, "outgoing", "injected", response.respondedAt, response.effectiveAction);
-      } else if (response.status === "rejected" || response.status === "error") {
-        registry.thread.transition(entry.messageId, "outgoing", "rejected", response.respondedAt, response.effectiveAction);
-      } else if (response.status === "expired") {
-        registry.thread.transition(entry.messageId, "outgoing", "timeout", response.respondedAt);
-      }
-      // accepted + queued: the target may still finalize; keep waiting.
-    }
-  };
-
-  const startWorkspacePeers = (ctx: ExtensionContext): void => {
+  const startWorkspacePeers = (
+    ctx: ExtensionContext,
+    recoveryReason?: "startup" | "reload" | "new" | "resume" | "fork",
+  ): void => {
     const cwd = ctx.cwd;
     const fence = captureRootSessionFence();
     const generation = ++workspacePeerGeneration;
@@ -4107,8 +4041,19 @@ export default function registerTeammateExtension(
             return { status: "rejected", message: "destination session changed before command delivery" };
           }
           const existing = registry.thread.get(command.commandId, "incoming");
+          if (existing && (existing.workspaceId !== command.workspaceId
+            || existing.peerOwnerId !== command.fromOwnerId || existing.peerOwnerNonce !== command.fromOwnerNonce
+            || (existing.localOwnerNonce !== undefined && existing.localOwnerNonce !== command.toOwnerNonce)
+            || existing.targetCorrelationId !== command.targetCorrelationId
+            || (existing.targetSessionId !== undefined && existing.targetSessionId !== fence.sessionId))) {
+            return { status: "rejected", message: "command does not match the durable delivery incarnation" };
+          }
           const replayReceipt = windowThreadReplayReceipt(existing);
           if (replayReceipt) return replayReceipt;
+          if (existing && (existing.status === "queued" || workspaceRootDelivery.wasAccepted(existing))) {
+            return { status: "accepted", message: "already accepted by this host", deliveryStage: "queued",
+              effectiveAction: existing.effectiveMode === "steer" ? "steer" : "follow_up" };
+          }
           const effectiveMessageKind = normalizeSessionMessageKind(
             command.messageKind,
             command.source === "monitor",
@@ -4124,6 +4069,7 @@ export default function registerTeammateExtension(
             workspaceId: command.workspaceId,
             peerOwnerId: command.fromOwnerId,
             peerOwnerNonce: command.fromOwnerNonce,
+            localOwnerNonce: command.toOwnerNonce,
             direction: "incoming" as const,
             source: command.source ?? "system",
             messageKind: effectiveMessageKind,
@@ -4178,37 +4124,19 @@ export default function registerTeammateExtension(
               effectiveMessageKind,
             );
             const effectiveAction = delivery.action;
-            const effectiveProvenance = provenanceWithDeliveryMode(commandProvenance, effectiveAction);
             const deferredFor = delivery.deferred
               ? effectiveMessageKind === "status" ? "status-policy" : "foreground-bash-bg"
               : undefined;
-            const delivered = safeSendMessage(pi, {
-              customType: "teammate-message",
-              content: formatWorkspaceRemoteRootMessage({
-                messageId: command.commandId,
-                fromOwnerId: command.fromOwnerId,
-                message: command.message,
-                effectiveAction,
-                source: command.source,
-                messageKind: effectiveMessageKind,
-                traceId: command.traceId,
-                replyTo: command.replyTo,
-                fromSessionName: command.fromSessionName,
-              }),
-              display: true,
-              details: {
-                source: "workspace-peer",
-                messageId: command.commandId,
-                fromOwnerId: command.fromOwnerId,
-                requestedMode: command.action,
-                mode: effectiveAction,
-                ...(command.messageKind === undefined ? {} : { messageKind: effectiveMessageKind }),
-                provenance: effectiveProvenance,
-                ...(deferredFor ? { deferredFor } : {}),
-              },
-            }, {
-              triggerTurn: sessionMessageTriggersTurn(effectiveMessageKind),
-              deliverAs: delivery.deliverAs,
+            // Persist the effective mode before send: actual consumption may be
+            // emitted synchronously, before the command response file exists.
+            const queuedEntry = registry.thread.record({ ...incoming, effectiveMode: effectiveAction,
+              status: "pending", updatedAt: Math.max(command.createdAt, Date.now()) });
+            const delivered = workspaceRootDelivery.enqueue(queuedEntry, (deliveryToken) => {
+              const { envelope } = workspaceRootMessageEnvelope(queuedEntry, { deliveryToken });
+              if (deferredFor) Object.assign(envelope.details, { deferredFor });
+              return safeSendMessage(pi, envelope, {
+                triggerTurn: sessionMessageTriggersTurn(effectiveMessageKind), deliverAs: delivery.deliverAs,
+              });
             });
             result = delivered
               ? {
@@ -4219,7 +4147,7 @@ export default function registerTeammateExtension(
                       ? "status stored as context by message policy"
                       : "steer deferred as follow_up while foreground bash_bg is active",
                   effectiveAction,
-                  deliveryStage: effectiveMessageKind === "status" ? "injected" : "queued",
+                  deliveryStage: registry.thread.get(command.commandId, "incoming")?.status === "injected" ? "injected" : "queued",
                 }
               : { status: "rejected", message: "main session rejected the message" };
             if (delivered && effectiveAction !== "steer" && foregroundToolRuns.size > 0) {
@@ -4284,14 +4212,24 @@ export default function registerTeammateExtension(
           if (!ownsWorkspacePeerGeneration()) {
             return { status: "rejected", message: "destination session changed before command acknowledgement" };
           }
-          registry.thread.record({
-            ...incoming,
-            ...(result.effectiveAction === undefined ? {} : { effectiveMode: result.effectiveAction }),
-            status: result.status === "accepted" ? result.deliveryStage ?? "queued" : "rejected",
-            updatedAt: Math.max(command.createdAt, Date.now()),
-          });
+          try {
+            registry.thread.record({
+              ...incoming,
+              ...(result.effectiveAction === undefined ? {} : { effectiveMode: result.effectiveAction }),
+              status: result.status === "accepted" ? result.deliveryStage ?? "queued" : "rejected",
+              updatedAt: Math.max(command.createdAt, Date.now()),
+            });
+          } catch (error) {
+            if (result.status !== "accepted") throw error;
+            // Acceptance cannot be rolled back to a protocol error after the host
+            // owns the queued custom message. The coordinator retries its journal.
+            logDiagnosticWarn("[pi-maestro-teammate] workspace accepted delivery journal failed:", error);
+          }
           return result;
-        });
+        }, { recoverDelivery: (command) => {
+          if (!ownsWorkspacePeerGeneration()) return undefined;
+          return workspaceRootDelivery.recoveryReceipt(command);
+        } });
         consumer.start();
         workspacePeerConsumer = consumer;
         try {
@@ -4312,6 +4250,8 @@ export default function registerTeammateExtension(
           await runtimeActor.stop().catch(() => undefined);
           return;
         }
+        if (recoveryReason) replayQueuedIncomingRootMessages(ctx, recoveryReason);
+        void workspaceRootDelivery.reconcile();
         // Events can arrive while the initial owner snapshot is being written.
         // Publish the latest in-memory progress once the publisher is bound.
         publisher.markDirty();
@@ -6603,7 +6543,7 @@ export default function registerTeammateExtension(
           }
         }
         const error = !cid && delivery.error?.startsWith("Session selector ")
-          ? `Workspace target "${params.to}" was not found. Use teammate-list with view=windows in Monitor mode, or the sender address from the received workspace message.`
+          ? `Workspace target "${params.to}" was not found. Use the full owner:<ownerId> from monitor list or teammate-list view=windows in Monitor mode, or the full sender address from the received workspace message. Revalidate once; not-found is not proof that the physical window closed.`
           : delivery.error;
         return {
           content: [{ type: "text", text: error ?? `Failed to send message to "${params.to}".` }],
@@ -7039,6 +6979,7 @@ export default function registerTeammateExtension(
   const exitMonitorInteractionMode = (): void => {
     const wasActive = monitorInteractionModeActive;
     monitorInteractionModeActive = false;
+    monitorWindowSubscriptions.clear();
     monitorToolExposure?.exit();
     if (widgetCtx) refreshModelCatalog(widgetCtx);
     void shutdownRemoteMonitorBinding().catch((error) => {
@@ -7694,6 +7635,7 @@ export default function registerTeammateExtension(
       window.settled = true;
       window.terminalResult = terminalResult;
       window.terminalPublished = true;
+      void monitorWindowSubscriptions.refresh();
     }
     return published;
   }
@@ -7822,6 +7764,7 @@ export default function registerTeammateExtension(
     if (!window) return true;
 
     window.terminalPublished = true;
+    void monitorWindowSubscriptions.refresh();
     window.runtimeDeathObservedAt = undefined;
     if (window.terminalFallbackTimer) {
       clearTimeout(window.terminalFallbackTimer);
@@ -9602,10 +9545,89 @@ export default function registerTeammateExtension(
         target: metadata.target,
         aliases: metadata.aliases,
         identity: metadata.identity,
+        sessionId: metadata.endpoint.sessionId,
+        sourceId: metadata.endpoint.sourceId,
+        generation: metadata.endpoint.generation,
         timeline: metadata.timeline ?? monitorTimelineForWindow(metadata.owner, metadata.thread),
       })),
     };
   };
+
+  // Cheap hook projection: cached exact directory/owner/thread evidence only.
+  // No facets, transcripts, SSH listing, or full query on each heartbeat.
+  const buildMonitorSubscriptionSnapshot = async (
+    authority: MonitorQueryAuthorityFence,
+    signal: AbortSignal,
+  ): Promise<MonitorQuerySnapshot> => {
+    if (signal.aborted || !ownsMonitorQueryAuthority(authority)) throw new Error("Monitor hook authority is stale.");
+    const publisher = workspacePeerPublisher;
+    if (!publisher) throw new Error("Workspace discovery is unavailable.");
+    const endpoints = selectMonitorVisibleRootEndpoints(monitorRegistry.listEndpoints(), publisher.identity, workspacePeerOwners)
+      .filter((endpoint) => endpoint.scope === "workspace-peer");
+    const windows: MonitorWindowReductionItemV1[] = [];
+    const targets: MonitorQuerySnapshot["targets"][number][] = [];
+    const thread = monitorRegistry.thread.list();
+    for (const endpoint of endpoints) {
+      const identity = monitorIdentityForEndpoint(endpoint);
+      const owner = workspacePeerOwners.find((item) => item.ownerId === identity.ownerId && item.ownerNonce === identity.ownerNonce);
+      const managed = [...managedWindows.values()].find((item) => item.ownerId === identity.ownerId && item.ownerNonce === identity.ownerNonce);
+      const exactThread = thread.filter((entry) => entry.workspaceId === identity.workspaceId
+        && entry.peerOwnerId === identity.ownerId && entry.peerOwnerNonce === identity.ownerNonce);
+      const messageId = managed?.completionHandle?.requestMessageId
+        ?? [...exactThread].reverse().find((entry) => entry.direction === "outgoing")?.messageId;
+      const workRef = messageId ? { kind: "message", id: messageId } : undefined;
+      // Only wake with a resource after its canonical publication is readable.
+      const terminal = managed?.terminalPublished ? managed.terminalResult : undefined;
+      const completion: MonitorWindowCompletionEvidenceV1[] = terminal && workRef
+        && terminal.requestMessageId === workRef.id
+        ? [{ target: { identity, workRef }, source: "canonical-completion", outcome: terminal.outcome,
+            revision: workspaceWindowTerminalPublicationId(terminal.requestMessageId), completedAt: terminal.settledAt,
+            ...((terminal.finalText ?? terminal.error) === undefined ? {} : { summary: boundedMonitorTimelineText(terminal.finalText ?? terminal.error!) }) }]
+        : [];
+      windows.push({ endpoint, owner, workRef, completion,
+        delivery: workRef ? exactThread.map((entry) => ({ target: { identity, workRef }, entry })) : [],
+        ...(managed?.launchError ? { managed: { target: { identity }, metadata: { name: managed.name, sessionName: managed.sessionName, launchError: managed.launchError } } } : {}),
+      });
+      const lifecycleRevision = (phase: "agent_start" | "agent_settled"): string | undefined => {
+        const progress = owner?.mainProgress;
+        const index = progress?.events.findLastIndex((event) => event.kind === "lifecycle" && event.phase === phase) ?? -1;
+        return progress && index >= 0 ? `lifecycle:${progress.baseCursor + index + 1}` : undefined;
+      };
+      targets.push({ target: `owner:${identity.ownerId}`, identity,
+        sessionId: endpoint.sessionId, sourceId: endpoint.sourceId, generation: endpoint.generation,
+        runningRevision: lifecycleRevision("agent_start"), settlementRevision: lifecycleRevision("agent_settled") });
+    }
+    if (!ownsMonitorQueryAuthority(authority)) throw new Error("Monitor hook authority changed during capture.");
+    return { state: reduceMonitorWindowStateV1({ observedAt: Date.now(), windows }), targets };
+  };
+  const monitorWindowSubscriptions = new MonitorWindowSubscriptions({
+    captureAuthority: captureMonitorQueryAuthority,
+    isAuthorityCurrent: ownsMonitorQueryAuthority,
+    read: buildMonitorSubscriptionSnapshot,
+    onError(error) {
+      logDiagnosticWarn("[pi-maestro-teammate] Monitor lifecycle refresh failed:", error instanceof Error ? error.message : String(error));
+    },
+    isTargetCurrent(target) {
+      const current = monitorRegistry.directory.get(target.identity.endpointId);
+      return Boolean(current && sameMonitorWindowIdentity(monitorIdentityForEndpoint(current), target.identity)
+        && current.sessionId === target.sessionId && current.sourceId === target.sourceId && current.generation === target.generation);
+    },
+    notify(event) {
+      safeSendMessage(pi, {
+        customType: "monitor-window-event",
+        content: `Monitor window ${event.event}: ${event.subscription.target}. Settlement alone does not prove business success. Revalidate exact owner and read completion evidence before follow-up.`,
+        display: true,
+        details: { ...event,
+          ...((event.event === "completed" || event.event === "failed")
+            && event.window.work.completion.source === "canonical-completion" && event.window.work.completion.revision
+            ? { resourceUris: [`agent://${event.window.work.completion.revision}`] } : {}),
+        },
+      }, { triggerTurn: true, deliverAs: "steer" });
+    },
+  });
+  const disposeMonitorWindowHooks = monitorRegistry.subscribe(() => {
+    void monitorWindowSubscriptions.refresh();
+  }, { emitCurrent: false });
 
   const monitorQueryDependencies = {
     captureAuthority: captureMonitorQueryAuthority,
@@ -9621,16 +9643,43 @@ export default function registerTeammateExtension(
     renderShell: "self",
     description: `Read normalized window-domain state in the active root Monitor generation.
 
-Use list for an attention-first overview, get for one complete normalized window card, and wait for one window's change, attention, or settled condition. This read-only tool does not expose provider transcripts or multi-target barriers. Use observe when you need raw provider snapshots, turns/todos/diagnose views, or an all/any/count barrier.`,
-    promptSnippet: "List, inspect, or wait on normalized Monitor window state.",
+Use list for an attention-first overview, get for one complete normalized window card, and one bounded wait for a window condition. Liveness, exact task result, and terminal closure are separate: settled is not success, failed is not proof of process exit, and disconnected means the exact endpoint is unavailable, not proven physical closure. Use the full target returned by list; revalidate after stale/not-found evidence before any follow-up, without silently switching owners.
+
+For deferred workspace completion, prefer subscribe to an exact owner lifecycle hook (running, settled, completed, failed, disconnected), then end the turn to receive notifications. Check subscriptions before registering again; retain subscriptionId for unsubscribe when the phase ends. Defaults wake on settle/completion/failure/disconnection; registration never replays historical events, so inspect already-settled work rather than waiting for a replay. Read the exact correlated completion resource before accepting work. Remote hooks are not supported. Hooks are cleared on Monitor exit/session switch/shutdown. This read-only tool does not expose provider transcripts or multi-target barriers and never closes a window. Use observe when you need raw provider snapshots, turns/todos/diagnose views, or an all/any/count barrier.`,
+    promptSnippet: "List, inspect, wait, or subscribe/unsubscribe to exact Monitor window lifecycle events.",
     promptGuidelines: [
       "Use monitor for ordinary window status and attention; use observe only for provider-level diagnostics or multi-target barriers.",
-      "Retain the exact target and cursor returned by monitor; stale results mean the owner or Monitor generation changed and must be listed again.",
+      "Retain the full exact target and cursor returned by monitor; stale or not-found evidence requires re-listing, not proof that the terminal closed or permission to create a replacement.",
+      "Use subscriptions to reuse an existing matching lifecycle hook. After subscribe or queued inbox evidence, end the turn instead of chaining wait/watch calls.",
       "Queued or accepted delivery is not model consumption; only injected or replied state proves consumption.",
     ],
     parameters: MonitorQueryParams,
     async execute(_id: string, params, signal: AbortSignal) {
-      const query = await executeMonitorQuery(params, signal);
+      let query: Awaited<ReturnType<typeof runMonitorQuery>>;
+      if (params.action === "subscribe" || params.action === "unsubscribe" || params.action === "subscriptions") {
+        query = { version: 1, action: params.action, status: "ok", observedAt: Date.now(), windows: [], attention: [], subscriptions: [] };
+        const authority = captureMonitorQueryAuthority();
+        try {
+          if (!authority || signal.aborted) throw new Error("Active root Monitor authority is required.");
+          if (params.action === "subscribe") {
+            await workspacePeerLifecycle;
+            if (!ownsMonitorQueryAuthority(authority) || signal.aborted) throw new Error("Monitor authority changed.");
+            await refreshWorkspacePeerOwnersStrict();
+            if (!ownsMonitorQueryAuthority(authority) || signal.aborted) throw new Error("Monitor authority changed.");
+            const subscription = await monitorWindowSubscriptions.subscribe(params.target!, params.events);
+            if (!ownsMonitorQueryAuthority(authority) || signal.aborted) {
+              monitorWindowSubscriptions.unsubscribe(subscription.subscriptionId);
+              throw new Error("Monitor authority changed.");
+            }
+            query.subscriptions = [subscription];
+          } else if (params.action === "unsubscribe") {
+            if (!monitorWindowSubscriptions.unsubscribe(params.subscriptionId!)) throw new Error("Subscription was not found.");
+          } else query.subscriptions = monitorWindowSubscriptions.list();
+        } catch (error) {
+          query.status = "aborted";
+          query.reason = error instanceof Error ? error.message : String(error);
+        }
+      } else query = await executeMonitorQuery(params, signal);
       const output = formatMonitorQueryResult(query);
       return {
         content: [{ type: "text", text: output.join("\n") }],
@@ -9841,7 +9890,9 @@ Use list for an attention-first overview, get for one complete normalized window
         throw new Error(`Terminal result request for window "${window.name}" was published without its outgoing journal entry.`);
       }
       window.terminalDeadlineAt = requestEntry.createdAt + MANAGED_WINDOW_TERMINAL_DEADLINE_MS;
+      // Interactive child is the terminal launcher, not the authenticated worker.
       if (window.runtime.provider === "native"
+        && window.presentation === "headless"
         && (window.runtime.child.exitCode !== null || window.runtime.child.signalCode !== null)) {
         armManagedWindowTerminalFallback(window, {
           outcome: "failed",
@@ -9866,14 +9917,17 @@ Use list for an attention-first overview, get for one complete normalized window
     renderShell: "self",
     description: `Create, list, or close Pi worker windows owned by the active Monitor coordinator.
 
-This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create uses the native provider by default; provider=herdr creates an interactive Pi workspace in an already-running local Herdr session. Both providers wait for exact workspace-peer registration, return the exact owner target for observation and messaging, and provide an optional canonical completion handle. Close is restricted to exact windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Terminal results remain retrievable after process exit through the handle's immutable agent:// resource; result bodies are not inlined into completion notices.`,
+This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create uses the native provider by default; provider=herdr creates an interactive Pi workspace in an already-running local Herdr session. Both providers wait for exact workspace-peer registration, deliver the objective once, return the full owner target for observation and messaging, and provide an optional canonical completion handle. Reuse only live workers already authorized for the requested scope; discovered external peers cannot be repurposed by a peer message.
+
+Interactive is the default: task completion keeps the window open for further interaction. Closing it requires a separate explicit close call with its retained name when the user asks or an authorized cleanup policy applies. Native headless workers are automatically stopped after canonical result publication. Admission rollback and host shutdown retain their safety cleanup paths. Close is restricted to exact windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. A failed completion resource is task evidence, not proof that an interactive terminal closed. Revalidate the exact owner before recovery; do not create a duplicate worker merely because result and liveness disagree. Terminal results remain retrievable after process exit through the handle's immutable agent:// resource; result bodies are not inlined into completion notices. Later turns cannot overwrite that resource.`,
     promptSnippet: "Create, list, or close Monitor-owned Pi worker windows.",
     promptGuidelines: [
-      "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers.",
+      "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers. Include the user's authorized scope and available human-source evidence in objective, without inventing authorization. A live external peer alone is not permission to assign it a new objective.",
       "Use provider=herdr only for an already-running local Herdr session. Herdr supports interactive presentation only and never starts or stops the Herdr server.",
       "The create call already delivers its objective to the worker. After create, do not resend that objective; use the returned owner target only for later corrections, new constraints, explicit response requests, or safety/lifecycle instructions.",
-      "Before close, retain the returned completion handle. Closing pending work forms a canonical cancelled completion at the same immutable agent:// resource.",
-      "Read a settled result with the resource tool using the returned agent:// URI; completion notices contain only a status summary and that URI.",
+      "Retain the name for close, full owner:<ownerId> for messages/observation, and completion handle for results. Before close, collect required results and confirm user intent or an authorized cleanup policy. Closing pending work forms a canonical cancelled completion at the same immutable agent:// resource; task completion alone does not authorize closing an interactive window.",
+      "Read a settled result with the resource tool using the returned agent:// URI; completion notices contain only a status summary and that URI. New work needs a new correlated result on a revalidated live worker, not an attempt to overwrite the original result.",
+      "On startup/delivery failure, inspect exact owner state and the existing result before retrying; keep the cumulative failure budget across windows and presentations. Source fixes require an authorized host reload before real-window acceptance, not more launches on unchanged loaded code.",
     ],
     parameters: WorkspaceWindowParams,
     async execute(
@@ -9946,7 +10000,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         return result(created.error ?? `Failed to create ${name}.`, true, created.handle);
       }
       return result(
-        `Created ${provider} ${presentation} worker window ${name} as owner:${created.owner.ownerId}. Result: ${created.handle.resource}`,
+        `Created ${provider} ${presentation} worker window ${name} as owner:${created.owner.ownerId}. Result: ${created.handle.resource}. Objective delivered once; do not resend it. ${presentation === "interactive" ? `Task completion keeps this window open; close explicitly with workspace-window close name=${name}.` : "Headless worker stops automatically after canonical result publication."}`,
         false,
         created.handle,
       );
@@ -11462,7 +11516,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   if (!isChild) {
   // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
-  const disposers: Array<() => void> = [];
+  const disposers: Array<() => void> = [disposeMonitorWindowHooks];
   disposers.push(registerWorkspaceProjectionDirtyListener(markWorkspacePeerDirty));
   const disposeTuiLocaleEvents = pi.events.on(SETTINGS_LOCALE_EVENT, (payload) => {
     if (!applySettingsLocaleEvent(payload)) return;
@@ -11573,6 +11627,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     state.baseCwd = ctx.cwd;
+    workspaceRootDelivery.bindSession(workspaceIdForCwd(ctx.cwd), state.currentSessionId);
     state.desktopTargetIdentity = desktopTargetIdentityForCurrentSession(state.currentSessionId, ctx.cwd);
     state.desktopTargetSessionGeneration = state.desktopTargetIdentity ? state.sessionGeneration : undefined;
     resetAdvisorSession(ctx.cwd);
@@ -11623,7 +11678,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     tool.description = buildTeammateToolDescription(ctx.cwd);
     pi.registerTool(tool);
     sessionHostRegistry?.thread.rebuild(ctx.sessionManager?.getEntries?.() ?? []);
-    replayQueuedIncomingRootMessages(ctx, event.reason);
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
@@ -11641,9 +11695,17 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceTerminalResultState = { settled: false, terminalPublished: false };
     workspaceTerminalResultPublications.clear();
     workspaceTerminalCompletionPublications.clear();
-    startWorkspacePeers(ctx);
+    startWorkspacePeers(ctx, event.reason);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
+      // Reuse existing low-cost single-flight owner discovery, not full Monitor queries.
+      // Explicit refresh sees repeated settles even when endpoint status/hash is unchanged.
+      if (monitorWindowSubscriptions.list().length) {
+        const authority = captureMonitorQueryAuthority();
+        void refreshWorkspacePeerOwners().then(() => {
+          if (authority && ownsMonitorQueryAuthority(authority)) return monitorWindowSubscriptions.refresh();
+        });
+      }
       void reconcileWorkspacePeerReceipts();
       if (workspaceTerminalResultState.settled && !workspaceTerminalResultState.terminalPublished) {
         void publishWorkspaceWindowTerminalResults(
@@ -11663,12 +11725,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         });
         periodicCompletionReconcile = reconcile;
       }
-      try {
-        redriveStaleIncomingRootMessages();
-      } catch (error) {
-        // A sweep failure must not crash the window via uncaughtException.
-        logDiagnosticError("[pi-maestro-teammate] workspace message re-drive failed:", error);
-      }
+
     }, RECONCILE_RECEIPT_INTERVAL_MS);
     workspaceReceiptReconcileTimer.unref?.();
     // Query after all extensions have registered their event listeners. The
@@ -11697,34 +11754,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       workspaceMainAssistantEventOpen = false;
     }
     if (event.message.role === "assistant") workspaceCurrentTurnAssistantMessage = event.message;
-    if (event.message.role !== "custom" || event.message.customType !== "teammate-message") return;
-    const details = event.message.details as Record<string, unknown> | undefined;
-    if (details?.source !== "workspace-peer" || typeof details.messageId !== "string") return;
-    const entry = sessionHostRegistry?.thread.get(details.messageId, "incoming");
-    if (!entry
-      || details.fromOwnerId !== entry.peerOwnerId
-      || (entry.status !== "pending" && entry.status !== "queued")) return;
-    const effectiveMode = details.mode === "steer" || details.mode === "follow_up"
-      ? details.mode
-      : entry.effectiveMode;
-    sessionHostRegistry?.thread.reconcileInjected(
-      entry.messageId,
-      Math.max(entry.createdAt, Date.now()),
-      effectiveMode,
-    );
-    // Finalize the claim-time receipt so the sender's ledger can reach
-    // outgoing/injected instead of staying queued forever.
-    if (typeof details.fromOwnerId === "string") {
-      const publisher = workspacePeerPublisher;
-      if (publisher) {
-        void finalizeWorkspacePeerResponse(
-          publisher.identity,
-          details.fromOwnerId,
-          entry.messageId,
-          "injected",
-        ).catch(() => undefined);
-      }
-    }
+    workspaceRootDelivery.consume(event.message);
   });
 
   pi.on("input", async (event) => {
@@ -11834,6 +11864,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     markWorkspacePeerDirty();
     const projectionChanged = !ownsRootSessionFence(previousFence);
     if (projectionChanged) {
+      monitorWindowSubscriptions.clear();
       abortAdvisorReview("Advisor session changed during compaction.");
       reconcileSettledAgentsForSession(state, { preserveExact: true });
       bindStateTurnRecorder();
@@ -11850,6 +11881,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("session_shutdown", async (event) => {
+    monitorWindowSubscriptions.clear();
     backgroundStatusHeartbeat.reset();
     // Fence and cancel deferred roster work before any async publication/drain.
     // Ownership releases received during those awaits cannot remount the widget.
@@ -11927,8 +11959,6 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       clearInterval(workspaceReceiptReconcileTimer);
       workspaceReceiptReconcileTimer = undefined;
     }
-    redrivenIncoming.clear();
-    replayedIncoming.clear();
     monitorRegistry.replaceEndpoints([]);
     monitorRegistry.thread.rebuild([]);
     exitMonitorInteractionMode();

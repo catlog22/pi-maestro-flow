@@ -3,7 +3,8 @@ import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
-import { complete, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { completeSimple, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import {
   convertToLlm,
   serializeConversation,
@@ -34,7 +35,11 @@ import type {
   CompactionOwner,
   CompactionTrigger,
 } from "./compaction-arbiter.ts";
-import { readEffectiveCompactionSettings } from "./compaction-settings.ts";
+import {
+  DEFAULT_SUMMARY_TIMEOUT_MS,
+  readEffectiveCompactionSettings,
+  type SummaryThinkingLevel,
+} from "./compaction-settings.ts";
 import {
   collectEvidenceReceipts,
   mergeEvidenceReceipts,
@@ -419,11 +424,15 @@ export function summaryRetryDelay(ms: number, signal: AbortSignal): Promise<void
 
 export interface SummaryCompletionRetryInput {
   /** Issue one completion attempt against the current fit. */
-  attempt: (fit: SummaryInputFit) => Promise<SummaryResponse>;
+  attempt: (fit: SummaryInputFit, signal: AbortSignal) => Promise<SummaryResponse>;
   /** Produce a smaller fit after a prompt-too-long failure, or undefined when nothing can be dropped. */
   trimForPromptTooLong: (fit: SummaryInputFit) => SummaryInputFit | undefined;
   initialFit: SummaryInputFit;
   signal: AbortSignal;
+  /** One deadline shared by every provider attempt and retry backoff. */
+  timeoutMs?: number;
+  /** Called only when a provider attempt is actually admitted. */
+  onAttempt?: (attempt: number, fit: SummaryInputFit) => void;
   /** Notified before each transient backoff sleep. */
   onTransientRetry?: (info: { attempt: number; maxRetries: number; delayMs: number; errorMessage: string }) => void;
   /** Injectable backoff sleep; defaults to the abortable summaryRetryDelay. */
@@ -436,10 +445,38 @@ export interface SummaryCompletionRetryInput {
  * boundary unchanged), and transient provider/transport failures back off and
  * retry without touching the input. Deterministic errors surface immediately.
  */
+export class SummaryTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Compaction summary exceeded its ${Math.round(timeoutMs / 1000)}s total deadline; cancellation was requested and the provider operation has settled. No checkpoint was saved.`);
+    this.name = "SummaryTimeoutError";
+  }
+}
+
 export async function completeSummaryWithRetries(
   input: SummaryCompletionRetryInput,
 ): Promise<{ response: SummaryResponse; fit: SummaryInputFit }> {
+  const timeoutMs = input.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS;
+  const deadline = new AbortController();
+  const signal = AbortSignal.any([input.signal, deadline.signal]);
+  const timer = setTimeout(() => deadline.abort(new SummaryTimeoutError(timeoutMs)), timeoutMs);
+  timer.unref?.();
+  try {
+    // Do not race a timeout against the provider promise: its settlement is
+    // required before the host can safely admit another compaction or prompt.
+    return await completeSummaryAttempts({ ...input, signal });
+  } catch (error) {
+    signal.throwIfAborted();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function completeSummaryAttempts(
+  input: SummaryCompletionRetryInput,
+): Promise<{ response: SummaryResponse; fit: SummaryInputFit }> {
   const delay = input.delay ?? summaryRetryDelay;
+  let attempts = 0;
   let fit = input.initialFit;
   let promptTooLongRetries = 0;
   let transientRetries = 0;
@@ -455,10 +492,14 @@ export async function completeSummaryWithRetries(
     return delayMs;
   };
   for (;;) {
+    input.signal.throwIfAborted();
     let response: SummaryResponse;
     try {
-      response = await input.attempt(fit);
+      input.onAttempt?.(++attempts, fit);
+      response = await input.attempt(fit, input.signal);
+      input.signal.throwIfAborted();
     } catch (error) {
+      input.signal.throwIfAborted();
       if (isPromptTooLongError(error) && promptTooLongRetries < MAX_PROMPT_TOO_LONG_RETRIES) {
         const retryFit = input.trimForPromptTooLong(fit);
         if (retryFit) {
@@ -574,6 +615,8 @@ export interface MaestroCompactionDetails {
    * toolResult session entry and its exact session:// recovery URI.
    */
   evidenceIndex?: EvidenceReceipt[];
+  /** Measured standalone summary request; absent on older or deterministic checkpoints. */
+  summaryMetrics?: SummaryMetrics;
   /**
    * Optional durable trigger metadata. Additive and self-describing (discriminated
    * by `owner`), so older readers can still consume the checkpoint.
@@ -581,10 +624,24 @@ export interface MaestroCompactionDetails {
   trigger?: CompactionTrigger;
 }
 
+export interface SummaryMetrics {
+  model: string;
+  thinkingLevel: SummaryThinkingLevel;
+  estimatedInputTokens: number;
+  outputTokenLimit: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  elapsedMs: number;
+  attempts: number;
+  droppedRounds: number;
+}
+
 export interface SummaryResponse {
   stopReason?: string;
   errorMessage?: string;
   content: Array<{ type: string; text?: string }>;
+  usage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  metrics?: SummaryMetrics;
 }
 
 interface SessionBeforeCompactResult {
@@ -632,9 +689,16 @@ export function buildSummaryCompletionOptions(input: {
   headers?: ProviderHeaders;
   maxTokens: number;
   signal: AbortSignal;
+  model?: Model<Api>;
+  thinkingLevel?: SummaryThinkingLevel;
 }) {
+  const { model, thinkingLevel = "off", ...options } = input;
+  const level = model ? clampThinkingLevel(model, thinkingLevel) : thinkingLevel;
   return {
-    ...input,
+    ...options,
+    // Anthropic's simple adapter treats the string "off" as truthy and
+    // enables thinking; omission is its explicit disabled branch.
+    reasoning: level === "off" ? undefined : level,
     maxRetries: SUMMARY_PROVIDER_MAX_RETRIES,
     cacheRetention: "none" as const,
     onPayload: disableInvalidBudgetThinking,
@@ -642,6 +706,18 @@ export function buildSummaryCompletionOptions(input: {
 }
 
 export const COMPACTION_STATUS_KEY = "maestro-auto-compact";
+export const SUMMARY_STATUS_KEY = "maestro-summary";
+
+export function formatSummaryProgress(input: {
+  estimatedInputTokens: number;
+  outputTokenLimit: number;
+  attempts: number;
+  thinkingLevel: SummaryThinkingLevel;
+  elapsedMs: number;
+  phase?: string;
+}): string {
+  return `SUMMARY in≈${input.estimatedInputTokens} out≤${input.outputTokenLimit} ${input.thinkingLevel} attempt ${input.attempts} ${Math.floor(input.elapsedMs / 1000)}s${input.phase ? ` · ${input.phase}` : ""}`;
+}
 export const COMPACTION_MODE_STATUS_KEY = "maestro-auto-compact-mode";
 
 export function autoCompactionIdleStatus(enabled: boolean): string {
@@ -886,19 +962,21 @@ export async function createMaestroCompaction(
   dependencies: CreateCompactionDependencies = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
   const failClosed = dependencies.failClosed === true;
-  const summaryFailure = (reason: string): SessionBeforeCompactResult | undefined => {
+  const summaryFailure = (reason: string, cancelled = false): SessionBeforeCompactResult | undefined => {
     try {
       ctx.ui.notify(
-        failClosed
-          ? `Maestro compaction summary failed; native fallback was blocked for provider-pressure recovery: ${reason}`
-          : `Maestro compaction summary failed; falling back to Pi native compaction: ${reason}`,
-        failClosed ? "error" : "warning",
+        cancelled
+          ? `Maestro compaction summary stopped; no checkpoint was saved: ${reason}`
+          : failClosed
+            ? `Maestro compaction summary failed; native fallback was blocked for provider-pressure recovery: ${reason}`
+            : `Maestro compaction summary failed; falling back to Pi native compaction: ${reason}`,
+        failClosed || cancelled ? "error" : "warning",
       );
     } catch {
       // The fail-closed return value is authoritative; UI failure must never
       // erase cancellation and re-enable Pi native summarization.
     }
-    return failClosed ? { cancel: true } : undefined;
+    return failClosed || cancelled ? { cancel: true } : undefined;
   };
 
   let details: MaestroCompactionDetails;
@@ -946,14 +1024,23 @@ export async function createMaestroCompaction(
       customInstructions: event.customInstructions,
     });
   };
-  const prompt = buildPromptFor(messages, 0);
-
   try {
+    event.signal.throwIfAborted();
     const response = dependencies.completeSummary
-      ? await dependencies.completeSummary(prompt, event, ctx)
+      ? await dependencies.completeSummary(buildPromptFor(messages, 0), event, ctx)
       : await completeWithCurrentModel({ messages, buildPrompt: buildPromptFor }, event, ctx, dependencies.summaryInputTokens);
+    event.signal.throwIfAborted();
+    if (response.stopReason === "aborted") {
+      return summaryFailure(response.errorMessage || "Summary generation was aborted", true);
+    }
     if (response.stopReason === "error") {
       return summaryFailure(response.errorMessage || "Unknown provider error");
+    }
+    if (response.stopReason === "length") {
+      return summaryFailure("Summary generation hit the output token limit and is incomplete", true);
+    }
+    if (response.content.some((part) => part.type === "toolCall")) {
+      return summaryFailure("The checkpoint summarizer attempted to call a tool", true);
     }
     const summary = response.content
       .filter((part) => part.type === "text" && typeof part.text === "string")
@@ -964,6 +1051,7 @@ export async function createMaestroCompaction(
       return summaryFailure("The summary was empty");
     }
 
+    if (response.metrics) details.summaryMetrics = response.metrics;
     return {
       compaction: {
         summary: appendEvidenceIndexSection(summary, details),
@@ -973,7 +1061,10 @@ export async function createMaestroCompaction(
       },
     };
   } catch (error) {
-    return summaryFailure(error instanceof Error ? error.message : String(error));
+    return summaryFailure(
+      error instanceof Error ? error.message : String(error),
+      event.signal.aborted || error instanceof SummaryTimeoutError,
+    );
   }
 }
 
@@ -988,7 +1079,7 @@ export function buildMaestroCompactionPrompt(input: {
     previousSummary: input.previousSummary ?? null,
     runtimeState: input.runtimeState,
     operatorFocus: input.customInstructions ?? null,
-  }, null, 2);
+  });
 }
 
 /** Append the bounded recovery-receipt section to any summary producer's output. */
@@ -1318,39 +1409,100 @@ async function completeWithCurrentModel(
     );
   };
 
-  const { response } = await completeSummaryWithRetries({
-    attempt: (attemptFit) => complete(
-      model,
-      {
-        systemPrompt: MAESTRO_COMPACTION_SYSTEM_PROMPT,
-        messages: [{
-          role: "user",
-          content: [{ type: "text", text: attemptFit.prompt }],
-          timestamp: Date.now(),
-        }],
-      },
-      buildSummaryCompletionOptions({
-        apiKey: summaryApiKey,
-        headers: summaryHeaders,
-        maxTokens: attemptFit.maxTokens,
-        signal: event.signal,
-      }),
-    ),
-    trimForPromptTooLong: fitPromptTooLongRetry,
-    initialFit: fit,
-    signal: event.signal,
-    onTransientRetry: ({ attempt, maxRetries, delayMs, errorMessage }) => {
-      try {
-        ctx.ui.notify(
-          `Compaction summary hit a transient provider error (${errorMessage}); retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt}/${maxRetries}).`,
-          "warning",
+  const startedAt = Date.now();
+  const thinkingLevel = clampThinkingLevel(model, settings.summary.thinkingLevel);
+  let attempts = 0;
+  let currentFit = fit;
+  let phase: string | undefined;
+  let providerSignal: AbortSignal | undefined;
+  let statusUnavailable = false;
+  const setSummaryStatus = (text: string | undefined) => {
+    if (statusUnavailable) return;
+    try {
+      ctx.ui.setStatus(SUMMARY_STATUS_KEY, text);
+    } catch (error) {
+      statusUnavailable = true;
+      console.warn(`[pi-maestro-flow] Summary status unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const updateProgress = () => setSummaryStatus(formatSummaryProgress({
+    estimatedInputTokens: currentFit.estimatedRequestTokens,
+    outputTokenLimit: currentFit.maxTokens,
+    attempts,
+    thinkingLevel,
+    elapsedMs: Date.now() - startedAt,
+    phase: providerSignal?.aborted ? "cancelling; awaiting provider settlement" : phase,
+  }));
+  const progressTimer = setInterval(updateProgress, 1000);
+  progressTimer.unref?.();
+  try {
+    const { response, fit: completedFit } = await completeSummaryWithRetries({
+      attempt: (attemptFit, signal) => {
+        providerSignal = signal;
+        return completeSimple(
+          model,
+          {
+            systemPrompt: MAESTRO_COMPACTION_SYSTEM_PROMPT,
+            messages: [{
+              role: "user",
+              content: [{ type: "text", text: attemptFit.prompt }],
+              timestamp: Date.now(),
+            }],
+          },
+          buildSummaryCompletionOptions({
+            apiKey: summaryApiKey,
+            headers: summaryHeaders,
+            maxTokens: attemptFit.maxTokens,
+            signal,
+            model,
+            thinkingLevel,
+          }),
         );
-      } catch {
-        // Notification is best-effort; the retry schedule is authoritative.
-      }
-    },
-  });
-  return response;
+      },
+      trimForPromptTooLong: fitPromptTooLongRetry,
+      initialFit: fit,
+      signal: event.signal,
+      timeoutMs: settings.summary.timeoutMs,
+      onAttempt: (attempt, attemptFit) => {
+        attempts = attempt;
+        currentFit = attemptFit;
+        phase = "requesting";
+        updateProgress();
+      },
+      onTransientRetry: ({ attempt, maxRetries, delayMs, errorMessage }) => {
+        phase = `retry ${attempt}/${maxRetries} in ${Math.round(delayMs / 1000)}s`;
+        updateProgress();
+        try {
+          ctx.ui.notify(
+            `Compaction summary hit a transient provider error (${errorMessage}); retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt}/${maxRetries}).`,
+            "warning",
+          );
+        } catch (error) {
+          console.warn(`[pi-maestro-flow] Summary retry notification failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    });
+    const usage = response.usage;
+    return {
+      ...response,
+      metrics: {
+        model: `${model.provider}/${model.id}`,
+        thinkingLevel,
+        estimatedInputTokens: completedFit.estimatedRequestTokens,
+        outputTokenLimit: completedFit.maxTokens,
+        ...(usage ? {
+          inputTokens: usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0),
+          outputTokens: usage.output,
+        } : {}),
+        elapsedMs: Date.now() - startedAt,
+        attempts,
+        droppedRounds: completedFit.droppedRounds,
+      },
+    };
+  } finally {
+    clearInterval(progressTimer);
+    setSummaryStatus(undefined);
+  }
 }
 
 function compactionModelCacheKey(reference: string, currentModel: Model<Api>): string {

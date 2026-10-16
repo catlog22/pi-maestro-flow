@@ -960,8 +960,20 @@ test("extension registers Board, LSP, browser, host-owned discovery, and the Gat
         return "Deny";
       },
     },
-    sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined, getSessionName: () => undefined },
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [] },
   } as unknown as ExtensionContext;
+  for (const customType of ["mb-peer", "bash-bg-complete", "loop"]) {
+    const event = {
+      type: "before_agent_start",
+      messageType: "custom",
+      message: { customType, content: [{ type: "text", text: "Wake the agent" }], display: false },
+      systemPrompt: "base",
+      systemPromptOptions: { skills: [] },
+    };
+    for (const handler of handlers.get("before_agent_start") ?? []) await handler(event, ctx);
+  }
   let toolResult: unknown;
   const toolEvent = { type: "tool_call", toolName: "bash", toolCallId: "permission-1", input: { command: "npm test" } };
   for (const handler of handlers.get("tool_call") ?? []) {
@@ -1123,6 +1135,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   const api = new Proxy({} as ExtensionAPI, {
     get(_target, property) {
       if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); active.push(tool.name); };
+      if (property === "getAllTools") return () => tools.map((tool) => ({ name: tool.name, description: tool.description, exposure: tool.exposure }));
       if (property === "getActiveTools") return () => [...active];
       if (property === "setActiveTools") return (names: string[]) => { active.splice(0, active.length, ...names); };
       if (property === "events") return { on: () => () => undefined, emit: () => undefined };
@@ -1214,6 +1227,15 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.equal(guardedPayload, undefined, "child aborts invalid thinking instead of degrading it");
   assert.equal(providerAborts, 1);
   await runHooks("session_start", { reason: "new" }, providerCtx);
+  for (const customType of ["mb-peer", "bash-bg-complete", "loop"]) {
+    await runHooks("before_agent_start", {
+      type: "before_agent_start",
+      messageType: "custom",
+      message: { customType, content: "Wake the child", display: false },
+      systemPrompt: "base",
+      systemPromptOptions: { skills: [] },
+    }, { ...providerCtx, isIdle: () => false });
+  }
   assert.equal(active.includes("compact_history"), false, "enabling New Context must not expose the legacy tool name");
   const structuredOutputDecision = await runHooks("tool_call", {
     type: "tool_call",

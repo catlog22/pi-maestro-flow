@@ -555,11 +555,18 @@ export declare function readWorkspacePeerResponseForOwner(identity: WorkspacePee
  * Finalize a command response as delivery advances from queued to injected and,
  * when a response is observed, replied. Stages are monotonic; replied is the
  * terminal response state. The rewrite preserves every field the sender uses
- * to validate the receipt. Returns false for a missing/non-accepted response,
- * an idempotent write, or a stage regression.
+ * to validate the receipt. Missing receipts require exact durable accepted and
+ * consumed recovery evidence. Returns false for missing evidence, non-accepted
+ * responses, an idempotent write, or a stage regression.
  */
 export declare function finalizeWorkspacePeerResponse(identity: WorkspacePeerIdentity, fromOwnerId: string, commandId: string, deliveryStage: WorkspacePeerDeliveryStage, options?: {
     now?: number;
+    /** Exact durable consumption binding, including a recovered original incarnation. */
+    receiptOwnerNonce?: string;
+    senderOwnerNonce?: string;
+    /** Exact accepted identity plus durable actual-consumption evidence, supplied by the root coordinator. */
+    recoveryReceipt?: WorkspacePeerCommandResponse;
+    beforeCommit?: () => void | Promise<void>;
 }): Promise<boolean>;
 export declare function waitForWorkspacePeerCommandResponse(identity: WorkspacePeerIdentity, command: WorkspacePeerCommand, options?: {
     timeoutMs?: number;
@@ -585,26 +592,30 @@ export declare function sendWorkspacePeerCommand(identity: WorkspacePeerIdentity
     response?: WorkspacePeerCommandResponse;
     timedOut: boolean;
 }>;
+/** Recovery authority supplies only durable accepted-delivery evidence for the exact command. */
+export interface WorkspacePeerDeliveryRecoveryOptions {
+    recoverDelivery?: (command: WorkspacePeerCommand) => Pick<WorkspaceCommandHandlerResult, "effectiveAction" | "deliveryStage"> | undefined;
+}
 export declare function consumeWorkspacePeerCommands(identity: WorkspacePeerIdentity, handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>, options?: {
     now?: number;
     limit?: number;
     /** @internal Test hook after claiming/reading a command but before handler fencing. */
     beforeHandle?: (command: WorkspacePeerCommand) => void | Promise<void>;
-}): Promise<WorkspaceConsumedCommand[]>;
+} & WorkspacePeerDeliveryRecoveryOptions): Promise<WorkspaceConsumedCommand[]>;
 export declare class WorkspacePeerCommandConsumer {
     #private;
     readonly identity: WorkspacePeerIdentity;
     readonly pollMs: number;
     constructor(identity: WorkspacePeerIdentity, handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>, options?: {
         pollMs?: number;
-    });
+    } & WorkspacePeerDeliveryRecoveryOptions);
     start(): void;
     poll(): Promise<WorkspaceConsumedCommand[]>;
     stop(): Promise<void>;
 }
 export declare function createWorkspacePeerCommandConsumer(identity: WorkspacePeerIdentity, handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>, options?: {
     pollMs?: number;
-}): WorkspacePeerCommandConsumer;
+} & WorkspacePeerDeliveryRecoveryOptions): WorkspacePeerCommandConsumer;
 export declare function cleanupWorkspacePeerMailboxes(identity: WorkspacePeerIdentity, options?: {
     now?: number;
 }): Promise<number>;

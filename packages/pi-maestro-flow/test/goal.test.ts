@@ -1411,6 +1411,41 @@ test("compaction continuation is isolated across consecutive Goal session lifecy
   }
 });
 
+test("custom before_agent_start cannot consume Goal user continuation markers", async () => {
+  let continuationChecks = 0;
+  let busy = false;
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { customType: string; content: string }, options: { triggerTurn?: boolean }) {
+      assert.equal(options.triggerTurn, true);
+      onBeforeAgentStart({ messageType: "custom", message });
+      if (!message.content.includes("maestro-goal-continuation")) return;
+      busy = true;
+      for (const customType of ["mb-peer", "bash-bg-complete", "loop"]) {
+        onBeforeAgentStart({
+          messageType: "custom",
+          message: { customType, content: [{ type: "text", text: message.content }] },
+        });
+      }
+      assert.equal(onInput({ source: "extension", text: message.content }), undefined,
+        "only the legitimate user input may claim the issued marker");
+      assert.deepEqual(onInput({ source: "extension", text: message.content }), { action: "handled" });
+      continuationChecks++;
+    },
+  } as never);
+  const ctx = createContext({ isIdle: () => !busy, hasPendingMessages: () => false });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Custom wakes preserve Goal markers" }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(continuationChecks, 1);
+    assert.equal(getActiveGoal()?.status, "active");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
 test("Goal continuation remains queued once across compaction cancel", async () => {
   const sent: string[] = [];
   initGoal({

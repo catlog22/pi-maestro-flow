@@ -1,3 +1,4 @@
+import { altKey } from "pi-maestro-settings-core/v1";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -14,6 +15,8 @@ import {
 	type WidthUtils,
 } from "../src/footer.ts";
 import { resolveGlyphs } from "../src/icons.ts";
+import { BashBgStore } from "../src/bash-bg-store.ts";
+import { renderBashBgSummary } from "../src/bash-bg-widget.ts";
 
 // Hermetic width utils: mock theme strips no ansi, so visible width == string length.
 const theme: Pick<Theme, "fg"> = { fg: (_c, t) => t };
@@ -473,20 +476,64 @@ test("Plan mode leads line one while duplicate thinking is omitted", () => {
 	assert.equal(lines[0].match(/high/g)?.length, 1);
 });
 
-test("footer has no background-job row", () => {
+test("footer has no background-job row without active jobs", () => {
 	const lines = renderFooter(parts({ width: 100 }));
 	assert.equal(lines.length, 1);
 	assert.doesNotMatch(lines[0], /BG|Alt\+J/);
 });
 
-test("workflow status renders after the mode-bearing first line", () => {
+test("active bash_bg status renders left-aligned on line two before usage", () => {
+	const bashBgStatus = `BG · 1 running · 8s · ${altKey("J")} details`;
+	const lines = renderFooter(parts({ width: 100, bashBgStatus, usageStatus: "quota 50%" }));
+	assert.equal(lines.length, 3);
+	assert.equal(lines[1], bashBgStatus);
+	assert.equal(lines[2], "quota 50%");
+	assert.doesNotMatch(lines[0], /BG/);
+});
+
+test("bash_bg status respects the footer's reserved final column", () => {
+	for (let width = 1; width <= 120; width++) {
+		const lines = renderFooter(parts({ width, bashBgStatus: `BG 1 running ${"long-command ".repeat(20)}` }));
+		assert.equal(lines.length, 2);
+		assert.ok(utils.measure(lines[1]) <= Math.max(1, width - 1));
+	}
+});
+
+test("bash_bg snapshots add, update and remove the footer's second line", () => {
+	const store = new BashBgStore();
+	const job = {
+		id: "bg-1", command: "npm run dev", cwd: "/workspace", pid: 123,
+		status: "running", startedAt: 2_000, updatedAt: 3_000,
+		exitCode: null, outputTail: "ready", outputBytes: 5, logPath: "/tmp/bg-1.log",
+	};
+	const render = () => renderFooter(parts({
+		width: 100,
+		bashBgStatus: renderBashBgSummary(store.snapshot(), 99, theme, utils, {
+			glyphs, spin: "*", now: 12_000,
+		})[0],
+	}));
+	assert.equal(render().length, 1);
+	store.applySnapshot({ jobs: [job] });
+	const runningLine = render()[1];
+	assert.match(runningLine, /BG/);
+	assert.ok(runningLine.includes(altKey("J")));
+	store.applySnapshot({ jobs: [{ ...job, status: "stopping" }] });
+	assert.notEqual(render()[1], runningLine);
+	assert.match(render()[1], /BG/);
+	store.applySnapshot({ jobs: [{ ...job, status: "completed", exitCode: 0, finishedAt: 12_000 }] });
+	assert.equal(render().length, 1);
+});
+
+test("workflow status renders after the mode-bearing first line and bash_bg status", () => {
 	const lines = renderFooter(parts({
+		bashBgStatus: "BG · 1 running",
 		workflowStatus: "⚑ session · running · 003/execute",
 		extensionStatuses: [{ key: "mode", text: "PLAN" }],
 	}));
-	assert.equal(lines.length, 2);
+	assert.equal(lines.length, 3);
 	assert.match(lines[0], /^PLAN/);
-	assert.match(lines[1], /^⚑ session/);
+	assert.match(lines[1], /^BG/);
+	assert.match(lines[2], /^⚑ session/);
 });
 
 test("maestro workflow snapshot renders a dedicated session/run line", () => {

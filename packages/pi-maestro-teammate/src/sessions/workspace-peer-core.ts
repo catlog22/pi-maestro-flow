@@ -2639,37 +2639,62 @@ export async function readWorkspacePeerResponseForOwner(
  * Finalize a command response as delivery advances from queued to injected and,
  * when a response is observed, replied. Stages are monotonic; replied is the
  * terminal response state. The rewrite preserves every field the sender uses
- * to validate the receipt. Returns false for a missing/non-accepted response,
- * an idempotent write, or a stage regression.
+ * to validate the receipt. Missing receipts require exact durable accepted and
+ * consumed recovery evidence. Returns false for missing evidence, non-accepted
+ * responses, an idempotent write, or a stage regression.
  */
 export async function finalizeWorkspacePeerResponse(
   identity: WorkspacePeerIdentity,
   fromOwnerId: string,
   commandId: string,
   deliveryStage: WorkspacePeerDeliveryStage,
-  options: { now?: number } = {},
+  options: {
+    now?: number;
+    /** Exact durable consumption binding, including a recovered original incarnation. */
+    receiptOwnerNonce?: string;
+    senderOwnerNonce?: string;
+    /** Exact accepted identity plus durable actual-consumption evidence, supplied by the root coordinator. */
+    recoveryReceipt?: WorkspacePeerCommandResponse;
+    beforeCommit?: () => void | Promise<void>;
+  } = {},
 ): Promise<boolean> {
-  const path = responsePath(identity, fromOwnerId, commandId);
-  const raw = await readBoundedJson(path, MAX_RESPONSE_FILE_BYTES);
-  const response = validateResponse(raw);
-  const stageOrder: Record<WorkspacePeerDeliveryStage, number> = {
-    queued: 0,
-    injected: 1,
-    replied: 2,
-  };
-  if (!response || response.status !== "accepted") return false;
-  if (response.deliveryStage !== undefined
-    && stageOrder[deliveryStage] <= stageOrder[response.deliveryStage]) return false;
-  const now = options.now ?? Date.now();
-  const updated: WorkspacePeerCommandResponse = {
-    ...response,
-    deliveryStage,
-    respondedAt: now,
-    expiresAt: now + MAX_RESPONSE_RETENTION_MS,
-  };
-  if (!validateResponse(updated)) return false;
-  await writePrivateJsonAtomic(path, updated, MAX_RESPONSE_FILE_BYTES);
-  return true;
+  return commitWorkspaceOwnerMutation(identity, async () => {
+    const path = responsePath(identity, fromOwnerId, commandId);
+    const raw = await readBoundedJson(path, MAX_RESPONSE_FILE_BYTES);
+    let response = validateResponse(raw);
+    let reconstructing = false;
+    if (!response && options.recoveryReceipt && deliveryStage !== "queued"
+      && options.receiptOwnerNonce !== undefined && options.senderOwnerNonce !== undefined) {
+      // Malformed or terminal files are not absence and must never be replaced.
+      const missing = await lstat(path).then(() => false, (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return true;
+        throw error;
+      });
+      const recovered = validateResponse(options.recoveryReceipt);
+      if (missing && recovered?.status === "accepted" && recovered.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER
+        && (recovered.deliveryStage === "injected" || recovered.deliveryStage === "replied")) {
+        response = recovered;
+        reconstructing = true;
+      }
+    }
+    const stageOrder: Record<WorkspacePeerDeliveryStage, number> = { queued: 0, injected: 1, replied: 2 };
+    if (!response || response.status !== "accepted"
+      || response.workspaceId !== identity.workspaceId || response.commandId !== commandId
+      || response.fromOwnerId !== identity.ownerId || response.toOwnerId !== fromOwnerId
+      || response.fromOwnerNonce !== (options.receiptOwnerNonce ?? identity.ownerNonce)
+      || (options.senderOwnerNonce !== undefined && response.toOwnerNonce !== options.senderOwnerNonce)) return false;
+    if (response.deliveryStage !== undefined
+      && (stageOrder[deliveryStage] < stageOrder[response.deliveryStage]
+        || (!reconstructing && stageOrder[deliveryStage] === stageOrder[response.deliveryStage]))) return false;
+    const now = options.now ?? Date.now();
+    const updated: WorkspacePeerCommandResponse = {
+      ...response, deliveryStage, respondedAt: Math.max(response.respondedAt, now),
+      expiresAt: Math.max(response.respondedAt, now) + MAX_RESPONSE_RETENTION_MS,
+    };
+    if (!validateResponse(updated)) return false;
+    await writePrivateJsonAtomic(path, updated, MAX_RESPONSE_FILE_BYTES, { beforeCommit: options.beforeCommit });
+    return true;
+  });
 }
 
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -2830,6 +2855,11 @@ async function recoverWorkspacePeerProcessingFiles(
   });
 }
 
+/** Recovery authority supplies only durable accepted-delivery evidence for the exact command. */
+export interface WorkspacePeerDeliveryRecoveryOptions {
+  recoverDelivery?: (command: WorkspacePeerCommand) => Pick<WorkspaceCommandHandlerResult, "effectiveAction" | "deliveryStage"> | undefined;
+}
+
 export async function consumeWorkspacePeerCommands(
   identity: WorkspacePeerIdentity,
   handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>,
@@ -2838,7 +2868,7 @@ export async function consumeWorkspacePeerCommands(
     limit?: number;
     /** @internal Test hook after claiming/reading a command but before handler fencing. */
     beforeHandle?: (command: WorkspacePeerCommand) => void | Promise<void>;
-  } = {},
+  } & WorkspacePeerDeliveryRecoveryOptions = {},
 ): Promise<WorkspaceConsumedCommand[]> {
   const now = options.now ?? Date.now();
   const limit = options.limit ?? 64;
@@ -2880,7 +2910,13 @@ export async function consumeWorkspacePeerCommands(
       }
       const response = await commitWorkspaceOwnerMutation(identity, async () => {
         let next: WorkspacePeerCommandResponse;
-        if (command.toOwnerNonce !== identity.ownerNonce) {
+        const recovered = options.recoverDelivery?.(command);
+        if (recovered?.deliveryStage) {
+          // An accepted journal record precedes this crash recovery. Retain the
+          // original responder incarnation so the sender's exact receipt fence holds.
+          next = makeResponse({ ...identity, ownerNonce: command.toOwnerNonce }, command,
+            "accepted", "recovered durable delivery acknowledgment", now, recovered);
+        } else if (command.toOwnerNonce !== identity.ownerNonce) {
           next = makeResponse(identity, command, "rejected", "destination owner instance has changed", now);
         } else if (command.expiresAt < now) {
           next = makeResponse(identity, command, "expired", "command expired before consumption", now);
@@ -2915,11 +2951,8 @@ export async function consumeWorkspacePeerCommands(
       await commitWorkspaceOwnerMutation(identity, async () => { await rm(claimPath, { force: true }); });
     } catch (error) {
       if (error instanceof WorkspaceOwnerClaimLostError) throw error;
-      try {
-        await commitWorkspaceOwnerMutation(identity, async () => { await rm(claimPath, { force: true }); });
-      } catch (cleanupError) {
-        if (cleanupError instanceof WorkspaceOwnerClaimLostError) throw cleanupError;
-      }
+      // Keep the processing record on persistence failure. Recovery re-enters the
+      // journal-backed handler without re-enqueuing work accepted in this host.
       throw error;
     }
   }
@@ -2933,16 +2966,18 @@ export class WorkspacePeerCommandConsumer {
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling: Promise<WorkspaceConsumedCommand[]> | undefined;
   #claimLost = false;
+  readonly #recovery: WorkspacePeerDeliveryRecoveryOptions;
 
   constructor(
     identity: WorkspacePeerIdentity,
     handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>,
-    options: { pollMs?: number } = {},
+    options: { pollMs?: number } & WorkspacePeerDeliveryRecoveryOptions = {},
   ) {
     this.identity = identity;
     this.pollMs = options.pollMs ?? 50;
     if (!boundedInteger(this.pollMs, 1) || this.pollMs > 1_000) throw new Error("command poll interval is outside protocol bounds");
     this.#handler = handler;
+    this.#recovery = options;
   }
 
   start(): void {
@@ -2955,7 +2990,7 @@ export class WorkspacePeerCommandConsumer {
   async poll(): Promise<WorkspaceConsumedCommand[]> {
     if (this.#claimLost) throw new WorkspaceOwnerClaimLostError();
     if (this.#polling) return this.#polling;
-    this.#polling = consumeWorkspacePeerCommands(this.identity, this.#handler);
+    this.#polling = consumeWorkspacePeerCommands(this.identity, this.#handler, this.#recovery);
     try {
       return await this.#polling;
     } catch (error) {
@@ -2991,7 +3026,7 @@ export class WorkspacePeerCommandConsumer {
 export function createWorkspacePeerCommandConsumer(
   identity: WorkspacePeerIdentity,
   handler: (command: WorkspacePeerCommand) => WorkspaceCommandHandlerResult | void | Promise<WorkspaceCommandHandlerResult | void>,
-  options: { pollMs?: number } = {},
+  options: { pollMs?: number } & WorkspacePeerDeliveryRecoveryOptions = {},
 ): WorkspacePeerCommandConsumer {
   return new WorkspacePeerCommandConsumer(identity, handler, options);
 }
@@ -3012,6 +3047,12 @@ export async function cleanupWorkspacePeerMailboxes(
       const before = await lstat(path).catch(() => undefined);
       if (!before?.isFile() || before.isSymbolicLink()) continue;
       const raw = await readBoundedJson(path, maximumBytes);
+      // Accepted root follow-ups can remain in the host queue longer than receipt
+      // retention. Age is not consumption; finalization starts terminal retention.
+      const response = validateResponse(raw);
+      if (response?.status === "accepted" && response.toOwnerId === identity.ownerId
+        && response.workspaceId === identity.workspaceId && response.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER
+        && response.deliveryStage === "queued") continue;
       const expiresAt = isRecord(raw) && boundedInteger(raw.expiresAt) ? raw.expiresAt : undefined;
       if (expiresAt === undefined || expiresAt >= now) continue;
       const current = await lstat(path).catch(() => undefined);

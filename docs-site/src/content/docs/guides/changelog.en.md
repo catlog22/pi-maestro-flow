@@ -5,7 +5,18 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current version: v0.33.0 — Stable Browser Sessions & Scoped Automation.** Node.js minimum 22.19.0 and Pi 0.99.0 baseline are unchanged; existing native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions/install commands retain their original values; this release's tests, build and publication evidence belong in repository RELEASE.md, not a premature pass claim here.
+> **Current version: v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability.** Node.js minimum 22.19.0 and Pi 0.99.0 baseline are unchanged; existing native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions/install commands retain their original values; this release's tests, build and publication evidence belong in repository RELEASE.md, not a premature pass claim here.
+
+## v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability
+
+- Flow **0.34.0**, Teammate **2.10.0**, Cockpit **0.24.4**; Backends **0.1.7**, Backend-Core **0.1.5**, Settings-Core **0.2.3**, Fabric/Fabric-Core **0.1.0**, pi-fluent-tui **0.1.2**, and all other packages are unchanged. The engine remains **`maestro-flow >=0.5.91`**; latest upstream/local **0.5.92** is not an exact pin. Pi **0.99.0** baseline and Node.js **≥22.19.0** remain unchanged.
+- **Browser recording/presentation**: managed/profile/CDP add silent WebM `start_video` / `stop_video`, chapter cards and action/pointer annotations. FFmpeg with VP8/WebM support is required. Recording spans runs/navigation; artifacts survive tab closure and existing files are never overwritten. Extension is unsupported, with no channel fallback. See the [browser guide](/guides/lsp-browser).
+- **Compaction summary optimization**: `compaction.summary.thinkingLevel` defaults to off and `timeoutMs` to 240000; window fitting, independent retry budgets, live progress and checkpoint retry/usage metrics. Explicit `new_context` remains model-summary-free; command resets first perform bounded history recovery. See [compaction settings](/guides/compaction-config).
+- **Teammate routing/Monitor**: catalog/routing guidance follows the tool contract. Exact-owner `subscribe` / `unsubscribe` / `subscriptions` never replay history or follow replacement owners. Workspace objectives are delivered once; interactive completion does not close a window. Root receipts distinguish queued from injected/replied, recovering only from exact consumption evidence without duplicate queue admission. See [dispatch](/guides/teammate-dispatch).
+- **Cockpit stability**: measured component layout/identity protects hidden viewport content; structural, boundary-spanning and resize changes retain native redraw. Terminal exit/crash restoration survives fullscreen recreation, without confusing task completion with physical terminal closure.
+- **Retries and bounded output**: HTTP/2, unknown-provider and stream-read errors enter bounded retry classification. Observation text/watch history, RPC telemetry and search/error output are capped before rendering/transmission; truncation does not change canonical results or prove success. Cancellation, authentication and deterministic-error boundaries remain unchanged.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.34.0`. Close Pi first, restart afterward, and update preserved local companion overrides to Teammate 2.10.0 / Cockpit 0.24.4. This entry makes no premature test, packaging, publication or cross-platform compatibility claim.
 
 ## v0.33.0 — Stable Browser Sessions & Scoped Automation
 

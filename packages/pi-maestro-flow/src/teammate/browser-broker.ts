@@ -15,6 +15,10 @@ import {
   type BrowserPickResult,
   type BrowserRunOutput,
   type BrowserTabInfo,
+  type BrowserVideoInfo,
+  type BrowserVideoOptions,
+  type BrowserVideoChapterOptions,
+  type BrowserVideoActionOptions,
 } from "../tools/browser/manager.ts";
 import type { PairingApproval } from "../tools/browser/bridge-server.ts";
 
@@ -55,6 +59,26 @@ class ScopedTeammateBrowserManager implements BrowserManagerLike {
     timeoutMs: number,
   ): Promise<BrowserPickResult> {
     return this.manager.pick(this.#physicalName(name), onCapture, signal, timeoutMs);
+  }
+
+  startVideo(name: string, cwd: string, options: BrowserVideoOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserVideoInfo> {
+    return this.manager.startVideo(this.#physicalName(name), cwd, options, signal, timeoutMs);
+  }
+
+  stopVideo(name: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserVideoInfo | undefined> {
+    return this.manager.stopVideo(this.#physicalName(name), signal, timeoutMs);
+  }
+
+  videoChapter(name: string, options: BrowserVideoChapterOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    return this.manager.videoChapter(this.#physicalName(name), options, signal, timeoutMs);
+  }
+
+  videoShowActions(name: string, options: BrowserVideoActionOptions, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    return this.manager.videoShowActions(this.#physicalName(name), options, signal, timeoutMs);
+  }
+
+  videoHideActions(name: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    return this.manager.videoHideActions(this.#physicalName(name), signal, timeoutMs);
   }
 
   async status(signal?: AbortSignal): Promise<BrowserManagerStatus> {

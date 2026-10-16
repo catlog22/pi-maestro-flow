@@ -1239,9 +1239,10 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   if (hostMode === "native") {
     try {
       const settings = SettingsManager.create(process.cwd(), getAgentDir());
+      const configuration = settings.getSettings();
       nativeDiscoverySelected = isNativeDiscoverySelected({
-        defaultTools: settings.getDefaultTools(),
-        extensions: settings.getSettings().extensions,
+        defaultTools: configuration.defaultTools,
+        extensions: configuration.extensions,
         cli: parseArgs(process.argv.slice(2)),
       });
     } catch (error) {
@@ -1255,8 +1256,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     hostDiagnosed = true;
     if (hostMode === "unknown") {
       ctx.ui.notify(`Pi host ${VERSION} is unverified; Maestro does not replace native MCP or tool discovery.`, "warning");
-    } else if (hostMode === "native" && nativeDiscoverySelected && !pi.getAllTools().some((tool) => tool.name === "tool_search")) {
-      ctx.ui.notify("Native tool_search is not loaded. Enable builtin:tool-search and +tool_search, or remove the discovery opt-in; no legacy search was started.", "warning");
     }
   });
   if (hostMode !== "native") installReturnedToolErrorBridge(pi);
@@ -4115,7 +4114,7 @@ When NOT to use:
   pi.on("before_agent_start", async (event, ctx) => {
     // This is Pi's strongest public session-input boundary. It is correlated by
     // the durable wake marker before any later agent lifecycle is accepted.
-    midTurnAutoCompaction.onBeforeAgentStart(event.prompt, ctx);
+    midTurnAutoCompaction.onBeforeAgentStart(event, ctx);
     // Pick up compaction settings edited while idle; cached again within the turn.
     midTurnAutoCompaction.refreshSettings();
     // Reset per-turn notify error latch so each turn starts clean.
@@ -4785,7 +4784,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     autoCompaction.onSessionStart(ctx, event);
   });
   pi.on("before_agent_start", (event, ctx) => {
-    autoCompaction.onBeforeAgentStart(event.prompt, ctx);
+    autoCompaction.onBeforeAgentStart(event, ctx);
     newContextToolSurface.sync(newContextToolsEnabled(ctx.cwd));
   });
   pi.on("agent_start", (_event, ctx) => {

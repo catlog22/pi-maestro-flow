@@ -212,6 +212,30 @@ test("worker flow-schedule report renderer exposes outcome and dispatch", () => 
   assert.deepEqual(call, ["  … flow-schedule report completed 123e4567"]);
 });
 
+test("coordinator guidance requires live authorized targets and separates admission from completion", () => {
+  const tool = createCoordinatorFlowScheduleTool({
+    resolve: () => { throw new Error("Description inspection must not dispatch work."); },
+  });
+  const description = tool.description ?? "";
+  const guidelines = tool.promptGuidelines?.join("\n") ?? "";
+  assert.match(description, /existing live, authorized workspace window/);
+  assert.match(tool.promptSnippet ?? "", /existing live, authorized workspace window/);
+  assert.match(description, /full owner target after revalidation/);
+  assert.match(description, /not a completion resource, inbox history, or shortened ID/);
+  assert.match(description, /Create saves a draft without sending work/);
+  assert.match(description, /start requests admission, not proven dispatch or completion/);
+  assert.match(description, /monitor provides normalized lifecycle state\/hooks/);
+  assert.match(description, /Scheduling does not authorize a new objective for an external peer/);
+  assert.match(guidelines, /revalidate the full live owner target and its authorized scope/);
+  assert.match(guidelines, /headless completion resource is not a reusable endpoint/);
+  assert.match(guidelines, /Do not use Flow to bypass a declined peer request/);
+  assert.match(guidelines, /Start acknowledgement alone is not successful admission/);
+  assert.match(guidelines, /Do not automatically create a replacement or reset the cumulative failure budget/);
+  assert.match(guidelines, /end the turn to consume them instead of chaining wait\/watch calls/);
+  assert.match(guidelines, /authorized host reload before real-window verification/);
+  assert.match(guidelines, /Cancel stops scheduling but does not close or reclaim the target window/);
+});
+
 test("coordinator tool schema is object-root and rejects action-inapplicable fields", () => {
   assert.equal(Check(FlowScheduleCoordinatorParams, { action: "list" }), true);
   assert.equal(Check(FlowScheduleCoordinatorParams, { action: "create", scheduleId: "release", target: TARGET, steps: [{ stepId: "verify", prompt: "Verify" }] }), true);

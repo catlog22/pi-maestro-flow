@@ -1,3 +1,121 @@
+# v0.34.0 — Browser Recording, Compaction & Runtime Stability
+
+> Scoped Windows x64 / Node 22.22.0 verification. **The user explicitly accepted
+> the unverified real-video encoding case for this release**: FFmpeg is absent,
+> temporary installation stalled, and a bounded binary download timed out.
+> This is not a passing recording/decoding test. Registry startup acceptance
+> remains a separate release gate; v0.33.0's startup waiver does not apply.
+
+## Overview
+
+Flow **0.34.0**, Teammate **2.10.0**, and Cockpit **0.24.4** include all pending
+working-tree changes and the fixes committed since **v0.33.0**. The ten other
+publishable workspace packages are unchanged and match their registry SHA-1s.
+
+## Highlights
+
+- **Browser recording and presentation:** `start_video` / `stop_video` capture
+  persistent, non-overwriting VP8/WebM artifacts for admitted pages; chapter
+  cards, action labels and pointers support guided demos. Managed/profile/CDP
+  recording requires FFmpeg; extension mode rejects unsupported video actions
+  rather than silently switching channels. Artifacts survive tab cleanup.
+  Implementation: `src/tools/browser/video*.ts`, `manager.ts`, `browser-tool.ts`.
+- **Compaction summaries:** configurable summary thinking (default `off`) and
+  timeout (default 240000 ms), fitted input windows, bounded retries, progress
+  and usage/attempt metrics. Explicit `new_context` still makes no model-summary
+  call; command-origin resets require bounded history recovery.
+  Implementation: `src/compaction/` and `src/tui/compaction-settings.ts`.
+- **Teammate lifecycle and routing:** exact-owner Monitor lifecycle subscriptions,
+  one-time workspace objective/root delivery, and clearer separation of queued,
+  consumed, settled, business success and physical process closure. Interactive
+  task completion does not implicitly close its window. Model precedence remains
+  owned by the tool contract; task-type guidance does not override it.
+  Implementation: Teammate `src/extension/`, `src/sessions/`, `src/models/`.
+- **Cockpit stability:** viewport ownership/layout checks, fullscreen rebuild and
+  terminal cleanup improve redraw stability without hiding required native
+  redraws. Agent-store/footer/tick handling follows the current viewport.
+  Implementation: Cockpit `src/viewport-stability.ts`, `src/terminal-cleanup.ts`,
+  `src/fullscreen-controller.ts`, `src/agents-store.ts`, `src/footer.ts`.
+- **Runtime hardening:** bounded observation/RPC/search/error output, HTTP/2 and
+  upstream stream-read retry classification, callback/transport error containment,
+  verifier permission routing, native tool discovery and custom-turn failover
+  compatibility. Cancellation/authentication boundaries remain intact.
+- **Repository and docs:** instruction modules are split into on-demand references;
+  install commands, bilingual banners, changelogs and affected guides are synced.
+
+## Source scope
+
+The pre-release snapshot spans **137 files**, approximately **9.2k inserted /
+1.1k removed lines**, relative to **v0.33.0**. Runtime source accounts for
+**3230 inserted / 762 removed lines** across the paths above. It includes
+**12 existing commits**, followed by the release snapshot and publication-record
+commits; test-only fixture repairs and release documentation are included.
+
+## Package versions
+
+| Package | Version | Publication |
+|---|---|---|
+| pi-maestro-teammate | 2.10.0 | before Flow |
+| pi-cockpit | 0.24.4 | before Flow |
+| pi-maestro-flow | 0.34.0 | after exact companions |
+| pi-maestro-settings-core | 0.2.3 | unchanged |
+| pi-maestro-backend-core / pi-maestro-backends | 0.1.5 / 0.1.7 | unchanged |
+| pi-maestro-fabric / pi-maestro-fabric-core | 0.1.0 | unchanged |
+| pi-fluent-tui | 0.1.2 | unchanged |
+| @dyw1234/active-win | 9.0.1 | unchanged |
+| @dyw1234/nut-js / nut-shared / nut-provider-interfaces | 4.2.7 | unchanged |
+
+Flow's exact companion dependencies and lockfile are synchronized. Engine range
+**`maestro-flow >=0.5.91`** is retained; npm latest and local upstream both report
+**0.5.92**. Pi validation baseline remains **0.99.0**, optional host peers remain
+`*`, and the Node minimum remains **22.19.0**. Minimum Node, macOS/Linux, model
+inference and credential-dependent features are not claimed verified.
+
+## Verification
+
+- **1519 unique selected tests passed**, **9 existing platform/environment skips**,
+  and **one real-video integration case failed for missing FFmpeg**, explicitly
+  accepted by the user. No test was disabled to obtain a pass.
+- Flow: **905 passed**, **7 POSIX skips**, **1 unaccepted-by-test-runner video
+  failure**. The missing-FFmpeg case was not rerun after bootstrap/download
+  failures. A stale extension test mock lacked `getAllTools`; that mock was
+  corrected and only its failed case reran successfully.
+- Teammate: **395 passed**, **2 skips**. Initial delegated execution inherited a
+  disabled child nesting budget; root/child fixtures now isolate and restore
+  their intended environment. All 37 affected cases passed after correction.
+  Schema-description assertions now use runtime type narrowing instead of
+  reading annotation fields absent from TypeBox's inferred types; the edited
+  metadata case and typecheck passed. No production workaround was added.
+- Cockpit: **219 passed**, no skips. All three changed package typechecks,
+  Teammate declaration consistency, and all workspace manifest/lock/exact
+  dependency-closure assertions passed.
+- Documentation `tsc && vite build` passed. Existing >500 kB Mermaid/Cynefin
+  chunk advisories remain; no visual browser validation is claimed.
+- Verification selected changed test files and directly affected boundaries,
+  not the unrelated root `test:release` matrix. Passing evidence was reused;
+  only invalidated/failed cases were rerun.
+- Initial tarball inventory parsing encountered lifecycle stdout; trailing JSON
+  parsing corrected the harness and remaining packages were inspected. All ten
+  unchanged workspace tarballs match npm; changed packages receive new versions.
+
+Artifact hashes and registry startup results will be recorded after packaging
+and publication; this section does not predeclare those checks as passed.
+
+## Install / upgrade
+
+```bash
+pi install npm:pi-maestro-flow@0.34.0
+pi list
+```
+
+Close Pi before upgrading and restart afterward. Update preserved local
+companion overrides to Teammate **2.10.0** / Cockpit **0.24.4**; ordinary managed
+registrations migrate automatically. Install FFmpeg separately for recording.
+
+---
+
+## Historical v0.33.0 notes (not v0.34.0 acceptance)
+
 # v0.33.0 — Session-Scoped Browser & Human Auto Controls
 
 > **Limited verification, explicitly accepted by the user:** 643 targeted tests

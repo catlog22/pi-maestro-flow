@@ -5,7 +5,18 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前版本：v0.33.0 — 浏览器会话稳定性与范围化自动决策。** Node.js 最低 22.19.0，Pi 验证基线 0.99.0；既有原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。历史版本记录与安装命令保留原值；本次测试、构建与发布证据由仓库 RELEASE.md 记录，不在此预先声明通过。
+> **当前版本：v0.34.0 — 浏览器录制、压缩摘要与运行时稳定性。** Node.js 最低 22.19.0，Pi 验证基线 0.99.0；既有原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。历史版本记录与安装命令保留原值；本次测试、构建与发布证据由仓库 RELEASE.md 记录，不在此预先声明通过。
+
+## v0.34.0 — 浏览器录制、压缩摘要与运行时稳定性
+
+- Flow **0.34.0**、Teammate **2.10.0**、Cockpit **0.24.4**；Backends **0.1.7**、Backend-Core **0.1.5**、Settings-Core **0.2.3**、Fabric/Fabric-Core **0.1.0**、pi-fluent-tui **0.1.2** 及其他包不变。引擎仍为 **`maestro-flow >=0.5.91`**；上游最新/本地版本 **0.5.92** 不代表精确 pin。Pi **0.99.0** 基线与 Node.js **≥22.19.0** 不变。
+- **浏览器录制与演示**：managed/profile/CDP 新增 `start_video` / `stop_video` 无声 WebM、章节卡片与动作/指针标注；需支持 VP8/WebM 的 FFmpeg。录制跨 run/导航，关闭 tab 后保留产物、不覆盖已有文件；extension 不支持且不自动切换通道。见[浏览器指南](/guides/lsp-browser)。
+- **压缩摘要优化**：`compaction.summary.thinkingLevel` 默认 off，`timeoutMs` 默认 240000；输入窗口拟合、独立重试预算、实时进度及 checkpoint 重试/用量指标。显式 `new_context` 仍无模型摘要；命令重置先做有界历史恢复。见[压缩配置](/guides/compaction-config)。
+- **Teammate 路由与 Monitor**：目录/路由提示遵循工具契约，新增精确 owner 的 `subscribe` / `unsubscribe` / `subscriptions`，不回放历史事件、不跟随替代 owner。Workspace objective 只投递一次，interactive 完成不自动关窗；root 回执区分 queued 与 injected/replied，并按精确消费证据恢复，避免重复入队。见[调度指南](/guides/teammate-dispatch)。
+- **Cockpit 稳定性**：以实测组件布局与身份保护隐藏视口，结构变化/跨边界/resize 保留原生重绘；加强 fullscreen 重建后的终端退出/异常恢复，不把物理终端关闭与业务完成混同。
+- **重试与有界输出**：HTTP/2、unknown-provider 与 stream-read 错误分类纳入有界重试；observation 文本/watch 历史、RPC telemetry 和 search/error 输出在渲染/传输前限量，截断不改写 canonical 结果，也不是成功证明。取消、认证与确定性失败边界不变。
+
+升级：`pi install npm:pi-maestro-flow@0.34.0`。升级前关闭 Pi，完成后重启；保留的本地 companion 覆盖同步到 Teammate 2.10.0 / Cockpit 0.24.4。此处不预先声明测试、打包、发布或全平台兼容通过。
 
 ## v0.33.0 — 浏览器会话稳定性与范围化自动决策
 

@@ -109,6 +109,25 @@ test("emulator: transcript growth + dock churn leaves no residue", () => {
 	}
 });
 
+test("emulator: moving and editing a boundary row does not leave its old copy in scrollback", () => {
+	const h = harness(60, 3, ["history", "agent A running 1s", "todo", "editor", "footer"]);
+	const patch = attachViewportStability(h.tui);
+	try {
+		h.render();
+		for (const next of [
+			["history", "new heading", "agent A running 2s", "editor", "footer"],
+			["history", "agent A completed", "new heading", "editor", "footer"],
+			["history", "new heading", "agent A sleeping", "editor", "footer"],
+		]) {
+			h.setLines(next);
+			h.render();
+			// Compare with the intended frame, not previousLines: a corrupted
+			// diff baseline can agree with the physical terminal and still be wrong.
+			assert.deepEqual([...h.terminal.emu.scrollback, ...h.actualScreen()], next);
+		}
+	} finally { patch.detach(); }
+});
+
 test("emulator: external stderr write scrolls screen outside the model → residue", () => {
 	const W = 60;
 	const H = 10;

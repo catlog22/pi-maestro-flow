@@ -15,9 +15,11 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.33.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.34.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **v0.33.0 — Stable Browser Sessions & Scoped Automation:** Flow 0.33.0 and Teammate 2.9.0; Cockpit 0.24.3, Backends 0.1.7, the remaining package versions, and `maestro-flow >=0.5.91` are unchanged. Named browser tabs survive turns, Plan-auto retains its session switch across cycles with fresh task authority, and Ask-auto timeout results remain machine recommendations, not answers or approval.
+> **v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability:** Flow 0.34.0, Teammate 2.10.0 and Cockpit 0.24.4; Backends 0.1.7 and all other packages unchanged. The engine remains `maestro-flow >=0.5.91` (latest upstream/local 0.5.92, not an exact pin). Browser WebM recording requires FFmpeg with VP8/WebM support, persists artifacts after tab closure, and adds chapter/action presentation on managed/profile/CDP (not extension). Compaction exposes summary thinking/timeout settings, progress and retry/usage metrics. Teammate aligns routing guidance, adds Monitor lifecycle subscriptions and hardens workspace root delivery; Cockpit improves viewport/terminal stability. HTTP/2/unknown/stream-read retries and bounded observation/RPC/search/error previews improve failure handling without changing approval or success-evidence boundaries.
+
+> **v0.33.0 baseline — Stable Browser Sessions & Scoped Automation:** Flow 0.33.0 and Teammate 2.9.0; Cockpit 0.24.3, Backends 0.1.7, the remaining package versions, and `maestro-flow >=0.5.91` are unchanged. Named browser tabs survive turns, Plan-auto retains its session switch across cycles with fresh task authority, and Ask-auto timeout results remain machine recommendations, not answers or approval.
 
 > **v0.32.1 baseline — Dependency Repairs & Runtime Hardening:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. The `active-win` and `@nut-tree-fork/nut-js` import keys use scoped `@dyw1234` forks; provenance and verification scope are in [RELEASE.md](../../RELEASE.md). Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified, with no whole-graph vulnerability-free claim.
 
@@ -77,7 +79,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.33.0
+pi install npm:pi-maestro-flow@0.34.0
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow

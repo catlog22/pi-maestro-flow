@@ -1110,6 +1110,77 @@ test("V2 unavailable falls back to the v1 bridge and canonical strings remain sa
 	assert.equal(s.snapshot().some((row) => row.correlationId === "legacy"), true);
 });
 
+test("router cleanup prunes both stores even when both change and when runtime is inactive", () => {
+	const router = new AgentReadStoreRouter();
+	router.applyLegacyStarted({ correlationId: "legacy", agent: "general" }, 1);
+	router.applyLegacyComplete({ correlationId: "legacy", exitCode: 0 }, 1000);
+	const snapshot = {
+		version: 2, revision: 1, kind: "agent-runs-snapshot", cursor: 1,
+		source: { streamId: "runtime", revision: 1, generation: 1 },
+		agents: [{ correlationId: "runtime", generation: 1, agent: "general", status: "completed", startedAt: 1, lastActivityAt: 1000 }],
+	};
+	assert.equal(router.applyRuntimeSnapshot(snapshot), true);
+	assert.equal(router.prune(1000 + AGENT_LINGER_MS), true);
+	assert.equal(router.legacy.size, 0);
+	assert.equal(router.runtime.size, 0, "no short-circuit when legacy prune already changed");
+	router.prune(1000 + COMPLETED_TOMBSTONE_MS);
+	assert.equal(router.hasPendingCleanup(), false);
+	assert.equal(router.applyRuntimeSnapshot(snapshot), true);
+	router.fallback();
+	assert.equal(router.prune(1000 + COMPLETED_TOMBSTONE_MS), true);
+	assert.equal(router.runtime.size, 0, "fallback does not strand the raw-runtime display roster");
+	assert.equal(router.hasPendingCleanup(), false);
+});
+
+test("display expiry preserves V2 generation fences, cursor and wake relationships until source cleanup", () => {
+	const s = new AgentsStore();
+	const snapshot = {
+		version: 2, revision: 1, kind: "agent-runs-snapshot", cursor: 2,
+		source: { streamId: "runtime", revision: 2, generation: 1 },
+		agents: [
+			{ correlationId: "parent", generation: 2, agent: "general", status: "sleeping", startedAt: 1, lastActivityAt: 1000 },
+			{ correlationId: "child", generation: 1, agent: "general", status: "running", parentCorrelationId: "parent", startedAt: 1, lastActivityAt: 1000 },
+		],
+	};
+	assert.equal(s.applyRuntimeSnapshot(snapshot), true);
+	assert.equal(s.prune(1000 + AGENT_LINGER_MS), true);
+	assert.equal(s.runtimeCursor(), 2, "display TTL does not advance the stream cursor");
+	assert.equal(s.snapshot(1000 + AGENT_LINGER_MS)[0].parentCorrelationId, undefined);
+	const delta = (changes: unknown[]) => ({
+		version: 2, revision: 1, kind: "agent-runs-delta", baseCursor: 2, nextCursor: 3,
+		source: { ...snapshot.source, revision: 3 }, changes,
+	});
+	assert.equal(s.applyRuntimeDelta(delta([{ kind: "tombstone", correlationId: "parent", generation: 1 }])), false);
+	assert.equal(s.applyRuntimeDelta(delta([{ kind: "upsert", entity: { ...snapshot.agents[0], generation: 1, status: "running" } }])), false);
+	assert.equal(s.runtimeCursor(), 2, "rejected stale generations leave the cursor unchanged");
+	assert.equal(s.applyRuntimeDelta(delta([{ kind: "upsert", entity: { ...snapshot.agents[0], generation: 3, status: "running", lastActivityAt: 1000 + AGENT_LINGER_MS } }])), true);
+	assert.equal(s.snapshot(1000 + AGENT_LINGER_MS).find((row) => row.correlationId === "child")?.parentCorrelationId, "parent");
+	assert.equal(s.applyRuntimeDelta({
+		...delta([{ kind: "tombstone", correlationId: "parent", generation: 3 }]),
+		baseCursor: 3, nextCursor: 4, source: { ...snapshot.source, revision: 4 },
+	}), true);
+	const raw = () => (s as unknown as { runtimeProjection: { snapshot(): { agents: unknown[] } } }).runtimeProjection.snapshot();
+	assert.equal(raw().agents.length, 1, "source tombstone releases raw entity safely");
+	assert.equal(s.applyRuntimeSnapshot({ ...snapshot, cursor: 4, agents: [] }), true);
+	assert.equal(raw().agents.length, 0, "replacement snapshot releases old source history");
+});
+
+test("clear releases the raw V2 projection and admits a fresh cursor on the same stream", () => {
+	const s = new AgentsStore();
+	const snapshot = ownedRuntimeSnapshot(projection(1), 1, 10, "old");
+	assert.equal(s.applyRuntimeSnapshot(snapshot), true);
+	s.clear();
+	const raw = (s as unknown as { runtimeProjection: { snapshot(): { agents: unknown[]; cursor: number } } }).runtimeProjection.snapshot();
+	assert.equal(raw.agents.length, 0, "clear must release raw entities, not just display rows");
+	assert.equal(raw.cursor, 0);
+	assert.equal(s.runtimeCursor(), undefined);
+	assert.equal(s.applyRuntimeDelta({
+		version: 2, revision: 1, kind: "agent-runs-delta", baseCursor: 0, nextCursor: 1,
+		source: snapshot.source, changes: [],
+	}), false, "clear requires a new snapshot before deltas");
+	assert.equal(s.applyRuntimeSnapshot({ ...snapshot, cursor: 1 }), true);
+});
+
 function projection(
 	generation: number,
 	sessionId = "session-b",

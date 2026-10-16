@@ -49,10 +49,12 @@ teammate({
 ### 模型优先级
 
 ```
-task model > 顶层 model > taskType 映射 > 角色 model > 父 Pi 模型
+task model > 顶层 model > 配置映射（显式 taskType 优先于 role 映射）> Agent frontmatter model > 已认证父模型 > child 默认
 ```
 
 > `taskType` 只影响模型路由，不改变角色行为。自定义 Agent 可声明新的小写类型标识，Control Center（`Alt+M` / `/teammate-models` 模型映射覆盖层，见 [TUI 操作指南](/guides/tui-guide)）自动合并。
+
+**Teammate 2.10.0 路由边界**：以 `teammate` 工具说明为优先级权威，模型目录不再注入相矛盾的 parent-first 指令。按实际阶段显式设置 `taskType`；省略时不从角色/提示推断。除用户点名或当前启用的 smart-selection 明确允许选择外，应省略 `model` 并保留配置路由；继承候选必须存在于已认证目录，显式未知 id 直接拒绝。
 
 ## SSH host-reference 远程通道
 
@@ -140,14 +142,33 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 | `teammate-list` | 列出 Agent（`view: active / named / all / roles`） |
 | `teammate-watch` | 查看最近输出、工具活动、收件箱（`lines` 控制行数）——旧版工具，需 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1`，新代码用 `observe` 替代 |
 | `teammate-wait` | 事件驱动等待完成（`timeoutMs`）或固定延迟（`waitMs`）——旧版工具，需 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1`，新代码用 `observe` 替代 |
-| `teammate-send` | 发送消息（`follow_up` 排队 / `steer` 中断 / `abort` 终止） |
+| `teammate-send` | `steer`（默认）在 turn boundary 注入、不打断；`follow_up` 等本轮结算；`interrupt` 请求中断；`abort` 终止本地 Agent |
 
-> v0.16.0 起，steer 控制面失败（未确认/拒绝的中断）降级为排队 follow-up，不再伪装成任务失败。
+> 未确认的本地 interrupt 降级为 queued follow-up；跨会话仅支持 `steer` / `follow_up`，不提供 interrupt/abort。
 
 ```javascript
 teammate-send({ to: "my-agent", message: "请也检查边界情况", mode: "follow_up" })
-teammate-send({ to: "my-agent", message: "停止当前方案，改用替代方案", mode: "steer" })
+teammate-send({ to: "my-agent", message: "停止当前方案，改用替代方案", mode: "interrupt" })
 ```
+
+## Monitor 订阅与工作区生命周期（Teammate 2.10.0）
+
+Monitor 模式的 root 可用 `monitor` 读取窗口域状态，新增 `subscribe` / `unsubscribe` / `subscriptions`。使用 `list` 返回的**完整** `owner:<ownerId>`，不截短 owner id；消息与观察用路由地址，结果读取则保留单独返回的精确 `agent://` 完成 URI，不把 owner 地址拼成资源 URI。
+
+```javascript
+monitor({ action: "list" })
+monitor({ action: "subscriptions" }) // 先复用已有 hook
+monitor({ action: "subscribe", target: "owner:<完整 ownerId>" })
+// 保存返回的 subscriptionId，结束当前 turn，等待事件；不要再链式 wait/watch。
+// 阶段完成后移除 hook：
+monitor({ action: "unsubscribe", subscriptionId: "<返回的 subscriptionId>" })
+```
+
+- hook 当前只支持精确 workspace owner（不支持 remote），绑定 owner/session/generation，默认事件为 `settled/completed/failed/disconnected`，可用 `events` 额外选择 `running`。注册不回放历史事件，已完成工作应直接读取结果。
+- hook 为进程内状态，Monitor 退出、session 切换或 shutdown 时清除；owner 被替换/消失会退役原 hook，不跟随同名替代窗口。`settled` 不等于业务成功，`disconnected` 不证明物理终端关闭；验收仍读精确关联完成资源。
+- `workspace-window create` 的 objective 只投递一次，不在创建后重复发送。默认 interactive 窗口完成任务后保持打开，关闭须另行授权 `close`；native-only headless 在 canonical result 发布后停止，不为模糊启动/结果而改用另一 presentation 重试。
+- 工作区 root 消息回执区分 **queued**（宿主队列接收）与 **injected/replied**（实际消费）；accepted 不等于模型已经读到。相同 host queue 的 reload/reconcile 不重复入队，恢复仅接受精确 durable receipt/消费证据，不因回执变旧就重投。
+- observation 的文本/结构化预览与 watch 历史有界，RPC telemetry 和 search/error 输出在 framing 前限量；截断不改写 canonical 结果。HTTP/2、unknown-provider 与 stream-read 错误按有界重试分类处理，取消/认证/确定性错误仍保留各自边界，不能把失败预览当作成功。
 
 ## 运行时保障（v0.25+）
 

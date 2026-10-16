@@ -311,15 +311,6 @@ test("buildWorkspaceOwnerSnapshot validates and preserves the complete Desktop t
   assert.equal(validateWorkspaceOwnerSnapshot(malformedLongPathSnapshot, identity), undefined);
 });
 
-test("workspace root message redrive and receipt reconciliation remain bounded", async () => {
-  const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(extensionSource, /const QUEUED_ROOT_REDRIVE_DELAY_MS = 60_000;/);
-  assert.match(extensionSource, /const QUEUED_ROOT_REDRIVE_COOLDOWN_MS = 60_000;/);
-  assert.match(extensionSource, /const QUEUED_ROOT_REDRIVE_MAX = 2;/);
-  assert.match(extensionSource, /previous\.count >= QUEUED_ROOT_REDRIVE_MAX/);
-  assert.match(extensionSource, /const RECONCILE_RECEIPT_MAX_AGE_MS = 10 \* 60_000;/);
-});
-
 test("workspace terminal result protocol classifies terminal turns and stays bounded", () => {
   assert.deepEqual(deriveWorkspaceWindowTerminalResult([{
     role: "assistant",

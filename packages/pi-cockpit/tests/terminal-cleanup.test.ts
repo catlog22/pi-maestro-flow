@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import {
+	ensureProcessTerminalCleanup,
 	isTerminalCleanupInstalled,
 	registerTerminalCleanup,
 	TERMINAL_RESTORE_SEQUENCE,
@@ -63,4 +65,42 @@ test("SIGINT listener is added on install and removed on uninstall", () => {
 	assert.equal(process.listeners("SIGINT").length, before + 1, "SIGINT handler registered");
 	release();
 	assert.equal(process.listeners("SIGINT").length, before, "SIGINT handler removed");
+});
+
+test("process fallback is bounded and survives the final consumer release", (t) => {
+	const originalWrite = process.stdout.write.bind(process.stdout);
+	let restores = 0;
+	t.mock.method(process.stdout, "write", (chunk: string | Uint8Array) => {
+		if (chunk === TERMINAL_RESTORE_SEQUENCE) { restores++; return true; }
+		return originalWrite(chunk);
+	});
+	for (let i = 0; i < 1000; i++) ensureProcessTerminalCleanup();
+	const release = registerTerminalCleanup(() => assert.fail("released consumer must not be flushed"));
+	release();
+	assert.equal(isTerminalCleanupInstalled(), true, "singleton exit safety net remains");
+	process.emit("exit", 0);
+	assert.equal(restores, 1);
+	process.emit("exit", 0);
+	assert.equal(restores, 1);
+	// Release an ordinary lease after flush to remove handlers for other tests.
+	registerTerminalCleanup(() => {})();
+});
+
+test("graceful exit and catchable signal paths retain broad restore and raw-mode fallback", () => {
+	const moduleUrl = new URL("../src/terminal-cleanup.ts", import.meta.url).href;
+	for (const signal of ["exit", "SIGTERM", "SIGINT"]) {
+		const script = `
+			import { ensureProcessTerminalCleanup, registerTerminalCleanup } from ${JSON.stringify(moduleUrl)};
+			process.stdin.setRawMode = (mode) => { process.stdout.write('raw:' + mode); return process.stdin; };
+			for (let i = 0; i < 5; i++) ensureProcessTerminalCleanup();
+			registerTerminalCleanup(() => { throw new Error('consumer failure'); });
+			registerTerminalCleanup(() => {})();
+			${signal === "exit" ? "process.exit(0);" : `process.emit(${JSON.stringify(signal)});`}
+		`;
+		const result = spawnSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 10_000 });
+		assert.equal(result.error, undefined, `${signal}: ${result.error?.message}`);
+		assert.equal(result.status, signal === "SIGINT" ? 1 : 0, `${signal}: ${result.stderr}`);
+		assert.equal(result.stdout.split(TERMINAL_RESTORE_SEQUENCE).length - 1, 1, `${signal}: one broad restore`);
+		assert.ok(result.stdout.includes("raw:false"), `${signal}: cooked mode restored`);
+	}
 });

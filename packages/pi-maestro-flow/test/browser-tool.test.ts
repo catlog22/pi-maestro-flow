@@ -86,6 +86,18 @@ class FakeBrowserManager implements BrowserManagerLike {
     if (onCapture && this.pickResult.captures.length > 0) onCapture(this.pickResult.captures);
     return this.pickResult;
   }
+  videoCalls: Array<{ action: string; name: string; cwd?: string; options?: unknown; timeoutMs: number }> = [];
+  async startVideo(name: string, cwd: string, options: unknown, _signal: AbortSignal | undefined, timeoutMs: number) {
+    this.videoCalls.push({ action: "start", name, cwd, options, timeoutMs });
+    return { path: "D:/workspace/demo.webm", mimeType: "video/webm" as const, recording: true };
+  }
+  async stopVideo(name: string, _signal: AbortSignal | undefined, timeoutMs: number) {
+    this.videoCalls.push({ action: "stop", name, timeoutMs });
+    return { path: "D:/workspace/demo.webm", mimeType: "video/webm" as const, recording: false, bytes: 42 };
+  }
+  async videoChapter(name: string, options: unknown, _signal: AbortSignal | undefined, timeoutMs: number) { this.videoCalls.push({ action: "chapter", name, options, timeoutMs }); }
+  async videoShowActions(name: string, options: unknown, _signal: AbortSignal | undefined, timeoutMs: number) { this.videoCalls.push({ action: "show", name, options, timeoutMs }); }
+  async videoHideActions(name: string, _signal: AbortSignal | undefined, timeoutMs: number) { this.videoCalls.push({ action: "hide", name, timeoutMs }); }
   async status(): Promise<BrowserManagerStatus> { return structuredClone(this.statusResult); }
   async pair(requestId: string, code: string) {
     return { requestId, port: 19222, installationId: `11111111-1111-4111-8111-${code.repeat(2)}` };
@@ -128,9 +140,10 @@ test("browser dialog settlement reports unexpected failures", async () => {
 });
 
 test("browser schema preserves legacy actions and adds explicit status/pair surfaces", () => {
-  assert.deepEqual((BrowserParams.properties.action as unknown as { enum: string[] }).enum, ["open", "close", "run", "guide", "status", "pair", "pick"]);
+  const actions = (BrowserParams.properties.action as unknown as { enum: string[] }).enum;
+  for (const action of ["open", "close", "run", "guide", "status", "pair", "pick", "start_video", "stop_video", "video_chapter", "video_show_actions", "video_hide_actions"]) assert.ok(actions.includes(action));
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
+    "action", "all", "app", "code", "cursor", "description", "dialogs", "duration", "ffmpeg_path", "filename", "fps", "kill", "name", "position", "request_id", "scale", "size", "timeout", "title", "topic", "url", "viewport", "visible", "wait_until",
   ]);
   assert.equal(Check(BrowserParams, { action: "open" }), true);
   assert.equal(Check(BrowserParams, { action: "close" }), true);
@@ -149,6 +162,59 @@ test("browser schema preserves legacy actions and adds explicit status/pair surf
   assert.match(timeoutDescription, /setup, execution and postprocessing share one deadline/i);
   assert.match(timeoutDescription, /Extension command\/execution waits are bounded but setup\/postprocessing may add latency/i);
   assert.match(timeoutDescription, /existing borrowed profile\/CDP pages only disconnect and may continue executing/i);
+});
+
+test("browser video actions validate options and forward scoped names, paths and budgets", async () => {
+  assert.equal(Check(BrowserParams, { action: "start_video" }), true);
+  assert.equal(Check(BrowserParams, { action: "stop_video" }), true);
+  for (const invalid of [{ fps: 0 }, { fps: 1.5 }, { fps: 61 }, { scale: 0 }, { scale: 5 }, { filename: "" }]) {
+    assert.equal(Check(BrowserParams, { action: "start_video", ...invalid }), false);
+  }
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  const ctx = { cwd: "D:/workspace" } as never;
+  const started = await tool.execute("start", {
+    action: "start_video", name: "demo", filename: "demo.webm", fps: 20, scale: 0.5, ffmpeg_path: "bin/ffmpeg", timeout: 12,
+  }, undefined, undefined, ctx);
+  assert.equal(started.details?.video?.recording, true);
+  assert.match(started.details?.result ?? "", /recording started/);
+  const stopped = await tool.execute("stop", { action: "stop_video", name: "demo" }, undefined, undefined, ctx);
+  assert.deepEqual(stopped.details?.video, { path: "D:/workspace/demo.webm", mimeType: "video/webm", recording: false, bytes: 42 });
+  assert.deepEqual(manager.videoCalls, [
+    { action: "start", name: "demo", cwd: "D:/workspace", options: { filename: "demo.webm", size: undefined, fps: 20, scale: 0.5, ffmpegPath: "bin/ffmpeg" }, timeoutMs: 12_000 },
+    { action: "stop", name: "demo", timeoutMs: 30_000 },
+  ]);
+});
+
+test("browser video chapter/show/hide expose the complete MCP contracts and forward options", async () => {
+  assert.equal(Check(BrowserParams, { action: "video_chapter" }), false);
+  assert.equal(Check(BrowserParams, { action: "video_chapter", title: "Chapter", duration: 0 }), true);
+  for (const position of ["top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"]) {
+    assert.equal(Check(BrowserParams, { action: "video_show_actions", position, cursor: "pointer" }), true);
+  }
+  for (const options of [{ position: "left" }, { cursor: "hand" }, { duration: -1 }]) assert.equal(Check(BrowserParams, { action: "video_show_actions", ...options }), false);
+  assert.equal(Check(BrowserParams, { action: "start_video", size: { width: 640, height: 480 } }), true);
+  assert.equal(Check(BrowserParams, { action: "start_video", size: { width: 0, height: 480 } }), false);
+  assert.equal(Check(BrowserParams, { action: "start_video", size: { width: 640, height: 480 }, scale: 1 }), false);
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  const ctx = { cwd: "D:/workspace" } as never;
+  await tool.execute("chapter", { action: "video_chapter", name: "demo", title: "Checkout", description: "Pay now", duration: 200 }, undefined, undefined, ctx);
+  await tool.execute("show", { action: "video_show_actions", name: "demo", duration: 750, position: "bottom", cursor: "none" }, undefined, undefined, ctx);
+  const hidden = await tool.execute("hide", { action: "video_hide_actions", name: "demo" }, undefined, undefined, ctx);
+  assert.match(hidden.content[0]?.type === "text" ? hidden.content[0].text : "", /Action annotations disabled/);
+  assert.deepEqual(manager.videoCalls, [
+    { action: "chapter", name: "demo", options: { title: "Checkout", description: "Pay now", duration: 200 }, timeoutMs: 30_000 },
+    { action: "show", name: "demo", options: { duration: 750, position: "bottom", cursor: "none" }, timeoutMs: 30_000 },
+    { action: "hide", name: "demo", timeoutMs: 30_000 },
+  ]);
+});
+
+test("browser stop_video without an open tab reports the MCP no-video result", async () => {
+  const tool = createBrowserTool(new BrowserManager());
+  const result = await tool.execute("stop", { action: "stop_video" }, undefined, undefined, { cwd: process.cwd() } as never);
+  assert.equal(result.details?.video, undefined);
+  assert.equal(result.content[0]?.type === "text" && result.content[0].text, "No videos were recorded.");
 });
 
 test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async () => {
@@ -205,10 +271,11 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.doesNotMatch(joined, /auto-launches Chrome with --remote-debugging-port=9222/);
   assert.match((BrowserParams.properties.app.properties.attach_user_profile as unknown as { description?: string }).description ?? "", /dynamic debugging port/);
   assert.match((BrowserParams.properties.app.properties.user_profile_dir as unknown as { description?: string }).description ?? "", /never copied or switched automatically/);
-  // Channel stays nested under app; pairing adds only its explicit request id.
-  assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
-  ]);
+  // Channel stays nested under app; recording options are separate from open options.
+  assert.equal(Object.hasOwn(BrowserParams.properties, "channel"), false);
+  assert.match(joined, /action:start_video/);
+  assert.match(joined, /action:stop_video/);
+  assert.match(joined, /Existing files are never overwritten/);
 });
 
 test("browser calling contracts clarify helper shapes, channels and timeout units", () => {

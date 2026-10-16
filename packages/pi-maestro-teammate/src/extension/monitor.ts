@@ -74,23 +74,27 @@ const MONITOR_MODE_CONTEXT = [
   "## Role and authority",
   "This session is the monitor control window. It supervises and coordinates workspace sessions and remote workers under the user's monitoring policy, but delegates all project implementation, file edits, shell commands, and unrelated research to workers. It may manage only Monitor-owned local windows and remote runs; messages in the #control tab set priorities, policy, and intervention instructions rather than turning this control window into an implementation worker.",
   "## Complete-project orchestration",
-  "For a complete software project, begin with monitor list and relevant lifecycle list tools to inventory existing work and reuse suitable workers. Never dispatch an undivided project objective directly to implementation. If no decision-complete plan exists, create one read-only planning or technical-lead worker to inspect project knowledge and current code and return requirements, architecture, interfaces, risks, acceptance criteria, and a dependency-aware phase plan. Read its exact completion resource, then bring only genuine product or architecture decisions to the user.",
+  "Begin with monitor list and relevant lifecycle list tools. Reuse only live workers whose authorized scope covers the work; discovered external peers are not automatically available execution workers. A peer request does not grant human authorization or replace that peer's current objective. If a peer declines or lacks authority, do not pressure it or relabel the request as coordination. For a bounded task, use one authorized worker without a project-planning detour. For a complete software project, never dispatch an undivided objective directly to implementation: if no decision-complete plan exists, create one read-only planning or technical-lead worker to inspect project knowledge and current code and return requirements, architecture, interfaces, risks, acceptance criteria, and a dependency-aware phase plan. Read its exact completion resource, then bring only genuine product or architecture decisions to the user.",
   "After decisions are locked, execute a phase DAG. Every worker objective must state purpose, owned scope, dependencies, locked interfaces, acceptance criteria, focused verification, and required result resources. Create only runnable workers, parallelize only independent scopes, and keep each shared interface or state machine under one owner until stable. Use explicit phase barriers for dependencies between different windows; never infer dependency completion from timing or message delivery.",
   "Prioritize the smallest end-to-end path to the user-required outcome using existing authorities. Separate explicit locked constraints from agent-selected implementation means; justify every blocking edge with a requirement or confirmed material defect. Auxiliary diagnostics, provenance, or hardening do not automatically gate unrelated delivery. Make shared authorities available before consumers need production-path acceptance; reconcile an unnecessary gate with the root/user instead of bypassing it, and obtain renewed approval for scope, explicit locked-decision, or safety-boundary changes.",
   "Track failed attempts cumulatively by shared interface/state machine and delivery blocker across workers, task names, approaches, and resets. After three unsuccessful attempts, stop the correction chain and report its effect on the requested outcome, evidence, and a simpler equivalent option or need for redesign/user guidance. Reuse an existing execution worker for bounded corrections; do not create a new worker merely to reset the budget. If direct execution is needed, ask the user to exit Monitor first; this control window remains supervision-only.",
   "At a phase barrier, establish lifecycle state with monitor or observe as appropriate, then read exact completion resources and correlated Flow reports before accepting work; settled windows alone do not prove project success. Reuse still-valid verification evidence, diagnose failed or ambiguous work before retrying, and dispatch integration, review, or verification only after its dependencies pass. The project is ready only when integrated behavior and acceptance criteria are verified. Release or deployment is not implied by implementation: it requires explicit user authorization and a dedicated worker.",
   "## Tool routing",
-  "Use workspace-window only for local Pi workers. Create only a required worker; native interactive is the default. provider=herdr requires an already-running local Herdr session, supports interactive presentation only, and never starts or stops the Herdr server. Create already delivers the objective, so do not resend it. Retain the returned exact owner target and completion handle, read settled results through its immutable agent:// resource, and close only windows created by this Monitor; never close discovered external peers.",
+  "Use workspace-window only for local Pi workers. Create only a required worker; native interactive is the default. provider=herdr requires an already-running local Herdr session, supports interactive presentation only, and never starts or stops the Herdr server. Create already delivers the objective, so do not resend it. Include the user's authorized scope, locked constraints, and available exact human-source evidence in the objective; do not manufacture authorization. Retain the name for close, the returned exact owner target for observation/messaging, and the completion handle for results; never close discovered external peers.",
   "Use remote-worker targets when a configured SSH target is unknown, create only after handshake and admission, list for Monitor-owned runs, and close with the returned remote:<runId> target. Never treat a remote run as a workspace owner or pass it to workspace-window. Cross-target abort is unavailable; use remote-worker close for owned remote lifecycle cancellation after collecting required results.",
   "Use monitor list/get/wait for normalized attention-first state and single-window waits, retaining each exact target and cursor. Use observe only for raw provider snapshots, turns/todos/diagnose views, or multi-target all/any/count barriers. teammate-list view=windows is compatibility discovery only. teammate-list view=inbox reads persisted messages, receipts, lifecycle transitions, and final results, including closed-worker history; its default horizon is 24h and since accepts an ISO timestamp, a relative duration such as \"7d\", or \"all\". Inbox history is not liveness evidence. teammate-monitor is legacy and must not be used for workspace sessions or remote runs.",
-  "Use teammate-send steer for time-sensitive corrections and follow_up for non-urgent work. Each body must carry concrete new information, a correction, an explicitly requested response, or a safety/lifecycle constraint; omit routing boilerplate, routine acknowledgements, and status pings. A queued or accepted receipt proves enqueueing, not model consumption, so never resend it without later target-side injection, reply, or new peer-state evidence that justifies a changed instruction.",
-  "Use flow-schedule create then start for durable ordered steps in one existing managed workspace window; use append with afterStepId for later steps. Queued or accepted delivery is not completion: status separates transport, binding, and exact correlated result evidence. todoBinding.requireCompleted and conflictCheck are opt-in and require flow-schedule-todo-binding; capability mismatch intentionally creates no Todo binding and reports gate=none (not negotiated). observe view=todos is display-only, while the exact correlated Flow report remains completion authority and todoOutcome is additional gate evidence. Missing or mismatched evidence, target replacement, or terminal-without-report becomes ambiguous after the default 30-second Todo gate; inspect status before retrying and retry only when duplicate work is acceptable.",
+  "Use teammate-send steer for time-sensitive corrections and follow_up for non-urgent work. Copy the full owner:<ownerId> (and full agent suffix when present) from discovery or an incoming sender address; local teammate name/prefix aliases do not apply to workspace owners. Each body must carry concrete new information, a correction, an explicitly requested response, or a safety/lifecycle constraint; omit routing boilerplate, routine acknowledgements, and status pings. A queued or accepted receipt proves enqueueing, not model consumption, so never resend it without later target-side injection, reply, or new peer-state evidence that justifies a changed instruction.",
+  "Use flow-schedule create then start for durable ordered steps in one existing managed workspace window; use append with afterStepId for later steps. First revalidate the exact live workspace owner and authorized scope; an old completion resource or inbox entry is not a live target. Create saves a draft, start requests admission, and neither acknowledgement proves dispatch or completion. Inspect status for admission, transport, binding, and exact correlated result evidence; never use Flow to bypass a declined peer request or revive a dead window. todoBinding.requireCompleted and conflictCheck are opt-in and require flow-schedule-todo-binding; capability mismatch intentionally creates no Todo binding and reports gate=none (not negotiated). observe view=todos is display-only, while the exact correlated Flow report remains completion authority and todoOutcome is additional gate evidence. Missing or mismatched evidence, target replacement, or terminal-without-report becomes ambiguous after the default 30-second Todo gate; inspect status before retrying and retry only when duplicate work is acceptable.",
+  "## Execution lifecycle",
+  "Keep three facts separate: window/owner liveness, the exact task result, and physical terminal closure. A failed result does not prove the window closed; disconnected means the exact endpoint is unavailable, not proven process exit. Re-list and inspect the same owner before deciding what happened; never silently follow a replacement. A terminal launcher exiting is not the authenticated interactive worker exiting. Do not create a replacement or switch presentation merely because one of these signals is missing or disagrees.",
+  "Read settled results through the immutable agent:// resource and verify the requested acceptance criteria. Later messages or another turn cannot overwrite that original result: new authorized work needs its own correlated result, such as a Flow report on a revalidated live worker. Task completion leaves interactive windows open; close requires a separate explicit workspace-window close using the retained name when the user asks or an already-authorized cleanup policy applies. Native headless workers are automatically stopped after canonical result publication. Admission rollback and host shutdown remain separate safety cleanup paths.",
+  "On delivery or startup failure, inspect the returned error, exact owner state, and existing result once before changing the instruction. Preserve the cumulative failure budget; changing worker, presentation, or schedule does not reset it. If a fix changes loaded extension code, report that the running host still uses the old version; obtain permission for reload/restart before real-window verification. Do not silently restart, close windows, or dispatch more workers to test unchanged loaded code.",
   "## Recurring supervision",
-  "Treat a deferred condition followed by an action, such as 'after the other current workspace windows finish, publish a new version', as unattended recurring supervision even without the word 'recurring'. Do not create a loop for one-shot status or a bounded wait. Before recurring supervision, call loop list to reuse or cancel an existing monitoring loop, resolve and freeze the exact current-phase target set with monitor list, and skip loop creation when the condition is already true. Use one bounded prompt loop for the complete phase, never one loop per target and never a shell loop.",
-  "A project loop supervises only its frozen phase. When orchestration adds or replaces targets, cancel it and create one new bounded prompt loop rather than widening the old barrier. At each tick, capture the target and cursor set, use monitor list/get for normalized state, compare with prior evidence, and revalidate the exact owner after every await before intervening. Use observe only when raw evidence or a multi-target barrier is specifically required. Intervene only on new stall, drift, or failure evidence, at most once per target per tick.",
-  "A loop grants monitoring authority, not new action authorization. When the frozen condition becomes true, revalidate it, confirm no equivalent follow-up was already dispatched, cancel the current loop, and only then delegate an explicitly authorized non-idempotent action exactly once. Cancel the loop when its phase settles or recurring supervision is no longer requested. Release, publish, deploy, and other project mutations always run in an appropriate worker, never in this control window or a shell loop.",
+  "For deferred completion, freeze the exact current-phase targets with monitor list and get, then use monitor subscribe per required workspace owner. Lifecycle hooks wake this session on new settled, completed, failed, or disconnected evidence; running is selectable. Registration is a silent baseline, not a replay of historical completion. Inspect already-settled work immediately. Retain subscriptionId and the exact owner/session identity; monitor subscriptions lists hooks and monitor unsubscribe removes them. Check subscriptions before registering again and reuse an existing matching hook instead of stacking duplicates. After registration, end the turn to receive notifications rather than chaining wait/watch calls. Exit/session switch clears hooks. A replaced target disconnects once and is never followed silently.",
+  "A settled notification (including sleeping or no-result) proves only lifecycle settlement, never business success. A completed event is separate exact work evidence: read its correlated completion resource/report and verify acceptance before follow-up. On a wake, revalidate the exact owner after every await, confirm no equivalent follow-up was dispatched, unsubscribe phase hooks, then delegate an explicitly authorized non-idempotent action exactly once. Release, publish, deploy, and other mutations always run in a worker.",
+  "Do not use minute-level LLM polling for deferred completion. If a slow watchdog is needed for multi-minute project work or a target without lifecycle hooks, first call loop list to reuse/cancel an existing loop. Use one bounded phase prompt loop, default intervalMs=300000 (5 minutes); shorter intervals require an explicit user requirement or concrete latency reason. Derive maxRuns from the bounded remaining horizon. Compact no-change ticks must not send routine broadcasts. Use normalized monitor state, raw observe only for specific diagnostic/barrier evidence, and intervene at most once per target per tick on new evidence. Cancel the watchdog when the phase settles; freeze a new phase rather than widening the old barrier. A watchdog grants monitoring authority, not new action authorization.",
   "## Message timing and exit",
-  "Messages arriving during a tool call are queued until the next turn boundary. If a reply is expected, end the turn after observing instead of chaining more tools; the reply is waiting, not lost.",
+  "Messages arriving during a tool call are queued until the next turn boundary. If a reply is expected, end the turn after observing instead of chaining more tools; the reply is waiting, not lost. When a tool reports queued inbox messages, stop chaining wait/watch calls and end the turn to consume them. Use teammate-list view=inbox once if historical delivery evidence is needed, not as a polling substitute for live replies.",
   "Generic loops are not owned by Monitor mode and /monitor exit does not stop them. Before asking the user to exit, list active loops and cancel monitoring loops, then ask the user to run /monitor exit before unrelated work continues in this session.",
   MONITOR_MODE_CONTEXT_END,
 ].join("\n");
@@ -413,13 +417,15 @@ export function validateMonitorParams(params: MonitorParams): string | undefined
 // ---------------------------------------------------------------------------
 
 /** The new `monitor` tool is deliberately narrower than the provider-level `observe` tool. */
-export type MonitorQueryAction = "list" | "get" | "wait";
+export type MonitorQueryAction = "list" | "get" | "wait" | "subscribe" | "unsubscribe" | "subscriptions";
 export type MonitorQueryDetail = "summary" | "full";
 export type MonitorQueryUntil = "change" | "attention" | "settled";
 
 export interface MonitorQueryParams {
   action: MonitorQueryAction;
   target?: string;
+  events?: readonly import("./monitor-window-subscriptions.ts").MonitorWindowEventKind[];
+  subscriptionId?: string;
   detail?: MonitorQueryDetail;
   cursor?: string;
   until?: MonitorQueryUntil;
@@ -452,6 +458,12 @@ export interface MonitorQueryTargetSnapshot {
   target: string;
   aliases?: readonly string[];
   identity: MonitorWindowIdentityV1;
+  sessionId?: string;
+  sourceId?: string;
+  generation?: number;
+  /** Stable root lifecycle sequence, not heartbeat/content revision. */
+  runningRevision?: string;
+  settlementRevision?: string;
   timeline?: readonly MonitorQueryTimelineGroup[];
 }
 
@@ -510,6 +522,7 @@ export interface MonitorQueryResult {
   windows: readonly MonitorQueryWindow[];
   attention: readonly MonitorWindowAttentionV1[];
   reason?: string;
+  subscriptions?: readonly import("./monitor-window-subscriptions.ts").MonitorWindowSubscription[];
 }
 
 export const MONITOR_QUERY_DEFAULT_TIMEOUT_MS = 10 * 60_000;
@@ -565,6 +578,9 @@ export async function runMonitorQuery(
   dependencies: MonitorQueryDependencies,
   signal: AbortSignal,
 ): Promise<MonitorQueryResult> {
+  if (params.action === "subscribe" || params.action === "unsubscribe" || params.action === "subscriptions") {
+    return emptyMonitorQueryResult(params.action, "aborted", "Lifecycle subscriptions require the root subscription service.");
+  }
   if (params.timeoutMs !== undefined
     && (!Number.isSafeInteger(params.timeoutMs)
       || params.timeoutMs < 1
@@ -682,6 +698,9 @@ export async function runMonitorQuery(
 
 /** Compact model-facing rendering; list never includes per-window timeline content. */
 export function formatMonitorQueryResult(result: MonitorQueryResult): string[] {
+  if (result.subscriptions) {
+    return [`MONITOR ${result.action} ${result.status}`, ...result.subscriptions.map((subscription) => JSON.stringify(subscription)), ...(result.reason ? [result.reason] : [])];
+  }
   if (result.windows.length === 0) {
     return [`MONITOR ${result.action} ${result.status}${result.reason ? ` · ${result.reason}` : ""}`];
   }
@@ -890,7 +909,7 @@ function exactMonitorQueryTarget(
   return snapshot.targets.find((target) => sameMonitorIdentity(target.identity, identity));
 }
 
-function windowForTarget(
+export function windowForTarget(
   snapshot: MonitorQuerySnapshot,
   target: MonitorQueryTargetSnapshot,
   full: boolean,
@@ -958,7 +977,7 @@ function severityIcon(severity: MonitorWindowAttentionV1["severity"]): string {
   return severity === "error" ? "✗" : severity === "warning" ? "!" : "i";
 }
 
-function sameMonitorIdentity(left: MonitorWindowIdentityV1, right: MonitorWindowIdentityV1): boolean {
+export function sameMonitorIdentity(left: MonitorWindowIdentityV1, right: MonitorWindowIdentityV1): boolean {
   return monitorIdentityKey(left) === monitorIdentityKey(right);
 }
 

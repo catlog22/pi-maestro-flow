@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeBeforeAgentStartInput, type BeforeAgentStartInput } from "../before-agent-start.ts";
 import { evidenceRefsValidationError, normalizeEvidenceRefs, type GoalEvidenceRef } from "./goal-evidence.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -630,8 +631,9 @@ export function onInput(event: { source?: string; text?: string }) {
   clearRecovery();
 }
 
-export function onBeforeAgentStart(event: { prompt: string }) {
-  markDelivered(event.prompt);
+export function onBeforeAgentStart(event: BeforeAgentStartInput) {
+  const input = normalizeBeforeAgentStartInput(event);
+  if (input.messageType === "user") markDelivered(input.text);
 }
 
 export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContext) {

@@ -61,6 +61,35 @@ browser 支持命名标签页、截图和页面内 JavaScript。操作前先 `br
 | `guide` | 返回 browser SOP registry/index 或指定 topic |
 | `status` | 显式启动/探测 bridge，返回 live 连接和命名 tab 元数据 |
 | `pair` | 仅 paired 模式批准 requestId/code |
+| `start_video` / `stop_video` | 开始录制 / 完成 WebM 并返回文件信息 |
+| `video_chapter` | 显示章节标题、可选说明与模糊背景 |
+| `video_show_actions` / `video_hide_actions` | 显示 / 移除动作标注、目标高亮与指针 |
+
+### WebM 录制与演示（v0.34.0）
+
+仅 **managed/profile/CDP** 支持；需要 PATH 中的 **FFmpeg（VP8/WebM）**，或用 `ffmpeg_path` 指向可执行文件。Extension 不支持这些 action，失败不会自动改用其他通道。先读 SOP 索引和相关完整 topic，再打开 tab：
+
+```javascript
+browser({ action: "guide" })
+browser({ action: "guide", topic: "core" })
+browser({ action: "open", name: "demo", url: "https://example.com" })
+browser({ action: "start_video", name: "demo", filename: "demo.webm",
+  size: { width: 800, height: 800 }, fps: 30 })
+browser({ action: "video_chapter", name: "demo", title: "页面演示",
+  description: "查看首页", duration: 2000 })
+browser({ action: "video_show_actions", name: "demo",
+  duration: 500, position: "top-right", cursor: "pointer" })
+browser({ action: "run", name: "demo", code: "print(await page.title())" })
+browser({ action: "video_hide_actions", name: "demo" })
+browser({ action: "stop_video", name: "demo" })
+browser({ action: "close", name: "demo" })
+```
+
+- **无声视口录制**跨多个 `run` 与导航持续，也包含该命名 tab 创建并拥有的页面/popups；不录制其他无关 borrowed tab，不生成动作代码。
+- `filename` 是相对 cwd 或绝对 `.webm` 路径；默认生成唯一文件名，**不覆盖已有文件**。`stop_video` 等待编码/落盘，返回 `path`、`mimeType`、`recording:false`、`bytes`，多文件可含 `videos`；没有录制时明确返回无视频。
+- 默认输出适配 **800×800** 边界；`size` 保持页面比例并向下归一到偶数尺寸，不是精确补边画布，以 `video.size` 为准。可改用 `scale`（>0 且 ≤4），不可与 `size` 同传；两者都不改变 viewport。`fps` 为 1–60，默认 30。
+- `duration` 单位是**毫秒**：章节默认 2000，动作默认 500。`position` 支持 top-left/top/top-right/bottom-left/bottom/bottom-right；`cursor` 默认 pointer，none 关闭装饰指针。章节与动作标注无需开启录制也能使用，且跨导航保留。
+- `close`、`close all` 与会话 shutdown 会完成活动视频并清除演示装饰，**不删除视频产物**。分享前自行检查视频中的敏感内容；这些操作不构成跨平台录制验收声明。
 
 ### run deadline 与失败诊断（v0.33.0）
 

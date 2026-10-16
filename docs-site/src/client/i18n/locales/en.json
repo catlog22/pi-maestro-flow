@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.33.0 — Stable Browser Sessions & Scoped Automation. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.33.0",
+    "title": "v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.34.0",
     "close": "Dismiss"
   },
   "accessibility": {

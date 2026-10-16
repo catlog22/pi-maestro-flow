@@ -34,18 +34,20 @@ function extensionSelection(entries: readonly string[] | undefined): boolean | u
   return selected;
 }
 
-/** Discovery opt-in never overrides a CLI allowlist or a disabled builtin. */
+/** Default discovery never overrides an explicit tool list or a disabled builtin. */
 export function isNativeDiscoverySelected(selection: NativeDiscoverySelection): boolean {
   const cli = selection.cli;
   const cliBuiltin = extensionSelection(cli?.extensions);
   if (cliBuiltin !== true && cli?.noExtensions) return false;
   if (cliBuiltin === false) return false;
   if (cliBuiltin !== true && extensionSelection(selection.extensions) === false) return false;
-  if (cli?.noTools || cli?.excludeTools?.includes("tool_search")) return false;
-  if (cli?.tools) return cli.tools.includes("tool_search");
-  let selected = false;
-  for (const entry of selection.defaultTools ?? []) {
-    if (entry === "tool_search" || entry === "+tool_search") selected = true;
+  if (cli?.noTools || cli?.excludeTools?.some((pattern) => matchesGlob("tool_search", pattern))) return false;
+  if (cli?.tools) return cli.tools.some((pattern) => matchesGlob("tool_search", pattern));
+  const defaults = selection.defaultTools;
+  let selected = defaults === undefined || defaults.includes("tool_search")
+    || (defaults.length > 0 && defaults.every((entry) => /^[+-]/.test(entry)));
+  for (const entry of defaults ?? []) {
+    if (entry === "+tool_search") selected = true;
     if (entry === "-tool_search") selected = false;
   }
   return selected;
@@ -63,7 +65,7 @@ export function applyNativeToolPolicy<T extends ToolDefinition>(
   };
 }
 
-/** Decorate only this extension's registrations; the host owns its loadout and tools. */
+/** Decorate only this extension's registrations and reuse the host's discovery tool. */
 export function withNativeToolPolicy(
   pi: ExtensionAPI,
   hostVersion: unknown,
@@ -71,7 +73,32 @@ export function withNativeToolPolicy(
 ): ExtensionAPI {
   if (getPiHostMode(hostVersion) !== "native") return pi;
   const originalRegister = pi.registerTool.bind(pi);
-  let registerTool = (tool: ToolDefinition): void => originalRegister(applyNativeToolPolicy(tool, discoveryEnabled));
+  const deferredDefinitions = new Map<string, ToolDefinition>();
+  let enabled = discoveryEnabled;
+  let registerTool = (tool: ToolDefinition): void => {
+    const decorated = applyNativeToolPolicy(tool, enabled);
+    if (enabled && tool.exposure === undefined && decorated.exposure === "deferred") {
+      deferredDefinitions.set(tool.name, tool);
+    } else {
+      deferredDefinitions.delete(tool.name);
+    }
+    originalRegister(decorated);
+  };
+  if (discoveryEnabled) {
+    pi.on("session_start", (_event, ctx) => {
+      if (!enabled) return;
+      const search = pi.getAllTools().find((tool) => tool.name === "tool_search");
+      if (search && search.exposure !== "hidden") {
+        const active = pi.getActiveTools();
+        if (!active.includes("tool_search")) pi.setActiveTools([...active, "tool_search"]);
+        if (pi.getActiveTools().includes("tool_search")) return;
+      }
+      enabled = false;
+      for (const tool of deferredDefinitions.values()) originalRegister(applyNativeToolPolicy(tool, false));
+      deferredDefinitions.clear();
+      ctx.ui.notify("Native tool_search is unavailable; Maestro low-frequency tools remain directly available.", "warning");
+    });
+  }
   return new Proxy(pi, {
     get(target, property, receiver) {
       if (property === "registerTool") return registerTool;

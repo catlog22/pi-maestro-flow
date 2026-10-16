@@ -143,7 +143,19 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
       return () => {};
     },
   });
-  registerTeammateExtension(pi as unknown as ExtensionAPI, runtimeOptions);
+  // This harness models a root host, even when the runner is a spawned teammate.
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousDepth = process.env.PI_TEAMMATE_DEPTH;
+  delete process.env.PI_TEAMMATE_CHILD;
+  delete process.env.PI_TEAMMATE_DEPTH;
+  try {
+    registerTeammateExtension(pi as unknown as ExtensionAPI, runtimeOptions);
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
+    else process.env.PI_TEAMMATE_DEPTH = previousDepth;
+  }
   assert.ok(teammate);
   assert.ok(teammateSend);
   assert.ok(observeTool);

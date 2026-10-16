@@ -41,6 +41,10 @@ test("package skill preparation copies canonical skills and removes generated ou
   mkdirSync(join(sourceDir, "workflow-skill-designer"), { recursive: true });
   mkdirSync(join(sourceDir, "team-swarm"), { recursive: true });
   mkdirSync(join(sourceDir, "scratch"), { recursive: true });
+  mkdirSync(join(sourceDir, "instructions"), { recursive: true });
+  for (const name of ["plan", "review", "knowledge", "architecture"]) {
+    writeFileSync(join(sourceDir, "instructions", `${name}.md`), `# ${name} instructions\n`, "utf8");
+  }
   writeFileSync(skillPath, "# Workflow skills\n", "utf8");
   writeFileSync(teamSwarmPath, "# Team Swarm\n", "utf8");
   writeFileSync(join(sourceDir, "SYSTEM.md"), "# System\n", "utf8");
@@ -53,6 +57,9 @@ test("package skill preparation copies canonical skills and removes generated ou
     assert.equal(readFileSync(join(targetDir, "workflow-skill-designer", "SKILL.md"), "utf8"), "# Workflow skills\n");
     assert.equal(readFileSync(join(targetDir, "team-swarm", "SKILL.md"), "utf8"), "# Team Swarm\n");
     assert.equal(readFileSync(join(targetDir, "SYSTEM.md"), "utf8"), "# System\n");
+    for (const name of ["plan", "review", "knowledge", "architecture"]) {
+      assert.equal(readFileSync(join(targetDir, "instructions", `${name}.md`), "utf8"), `# ${name} instructions\n`);
+    }
     assert.equal(existsSync(join(targetDir, "settings.local.json")), false, "settings.local.json is local-only");
     assert.equal(existsSync(join(targetDir, "model-failover.json")), false, "model-failover.json is local-only");
     assert.equal(existsSync(join(targetDir, "scratch")), false, "scratch is local-only");

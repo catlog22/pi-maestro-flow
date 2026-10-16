@@ -169,6 +169,13 @@ class RuntimeReadModelProjectionV2 {
 
 	get cursor(): number { return this.#cursor; }
 
+	clear(): void {
+		this.#agents.clear();
+		this.#cursor = 0;
+		this.#source = { streamId: "uninitialized", revision: 1, generation: 1 };
+		this.#initialized = false;
+	}
+
 	applySnapshot(input: unknown): boolean {
 		const snapshot = parseRuntimeReadModelSnapshotV2(input);
 		if (!snapshot) return false;
@@ -817,10 +824,19 @@ export class AgentsStore {
 				changed = true;
 			}
 		}
+		// Do not delete raw V2 entities here: their generation fences and parent
+		// relationships belong to the source stream, not the display TTL. A later
+		// delta may wake the same logical agent. Only source tombstones, replacement
+		// snapshots and clear() can safely release that canonical history.
 		for (const [id, at] of this.completedAt) {
 			if (now - at >= COMPLETED_TOMBSTONE_MS) this.completedAt.delete(id);
 		}
 		return changed;
+	}
+
+	/** Tombstones need cleanup even after the last visible terminal row expires. */
+	hasPendingCleanup(): boolean {
+		return this.completedAt.size > 0 || this.hasLingering();
 	}
 
 	/** True while a terminal row is counting down, so the redraw loop can expire it. */
@@ -1025,6 +1041,7 @@ export class AgentsStore {
 
 	clear(): void {
 		this.roster.clear();
+		this.runtimeProjection.clear();
 		this.completedAt.clear();
 		this.canonicalRoster = false;
 		this.viewingId = undefined;
@@ -1147,6 +1164,17 @@ export class AgentReadStoreRouter {
 
 	applyRuntimeDelta(payload: unknown): boolean {
 		return this.applyRuntimeDeltaResult(payload) === "applied";
+	}
+
+	/** Cleanup is independent of which read source is rendered. Never prune on event ingestion. */
+	prune(now = Date.now()): boolean {
+		const legacyChanged = this.legacy.prune(now);
+		const runtimeChanged = this.runtime.prune(now);
+		return legacyChanged || runtimeChanged;
+	}
+
+	hasPendingCleanup(): boolean {
+		return this.legacy.hasPendingCleanup() || this.runtime.hasPendingCleanup();
 	}
 
 	fallback(): void {

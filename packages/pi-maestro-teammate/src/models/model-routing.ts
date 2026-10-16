@@ -2555,7 +2555,7 @@ export function formatModelRoutingConfig(
   const table = discoverRoutingTaskTypes(cwd, agents, config)
     .map((taskType) => {
       const fallbacks = config.fallbackMappings?.[taskType]?.join(",") || "none";
-      return `- ${taskType}: model=${config.mappings[taskType] ?? "auto/inherit main session"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
+      return `- ${taskType}: model=${config.mappings[taskType] ?? "auto"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
     })
     .join("\n");
   const unreachable = unreachableRoutingTargets(config, availableModels);
@@ -2591,7 +2591,7 @@ export function appendTaskTypeRoutingContext(
     TASK_TYPE_ROUTING_START_MARKER,
     "## Teammate taskType routing",
     "`taskType` selects configured model, fallback-model, and thinking defaults (and, in experts mode, the default expert agent when none is given); it never changes a chosen agent's role, tools, permissions, or task scope.",
-    "Set `tasks[].taskType` by the task's actual phase; top-level `taskType` is the default for all tasks. If omitted, the runtime uses the selected role's model configuration, then may inherit the parent model. No role or prompt inference assigns a task type. Set `model` only to override routing.",
+    "Set `tasks[].taskType` by the task's actual phase; top-level `taskType` is the default for all tasks. No role or prompt inference assigns a task type.",
     "",
     "Legal task types (routing configuration may declare more):",
     ...TEAMMATE_TASK_TYPES.map((type) => `  - ${type}`),
@@ -2647,7 +2647,7 @@ export function appendSmartModelSelectionContext(
     "5. If intelligence is unavailable or stale, confidence is low, candidates materially tie, or no ranked candidate matches, omit `model` and retain configured taskType/role routing.",
     "6. Never treat unknown pricing as free, never send the task prompt to an external ranking service, and never rewrite persistent routing profiles from a recommendation.",
     confirmation,
-    "This smart-mode rule is the only exception to the catalog default that says to omit `model` unless the user names one.",
+    "This enabled smart-selection guidance authorizes model selection under the `teammate` tool description's omit-model rule; that description remains authoritative for resolution precedence.",
     SMART_MODEL_SELECTION_END_MARKER,
   ].join("\n");
   if (start >= 0 && end >= start) {

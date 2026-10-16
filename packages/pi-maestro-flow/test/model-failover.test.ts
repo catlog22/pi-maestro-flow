@@ -229,6 +229,60 @@ test("attached images prefer a healthy multimodal fallback", async () => {
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
+for (const route of ["native", "vision"] as const) {
+  test(`custom content image blocks use ${route} image routing without user images`, async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-custom-image-"));
+    try {
+      writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+      const image = { type: "image", data: Buffer.from("custom image").toString("base64"), mimeType: "image/png" };
+      const analyzed: unknown[] = [];
+      const runtime = harness(cwd, undefined, {
+        multimodal: route === "native" ? ["provider/backup"] : [],
+        visionAnalyzer: async (_ctx, input) => {
+          analyzed.push(input);
+          return { text: "Custom image analysis", model: "helper/vision", cached: false };
+        },
+      });
+      const result = await runtime.emit("before_agent_start", {
+        messageType: "custom",
+        message: { customType: "other-extension", content: [{ type: "text", text: "inspect" }, image] },
+      }) as { message?: { details?: { routes?: Array<{ route: string }> } } };
+      assert.deepEqual(result.message?.details?.routes?.map((entry) => entry.route), [route]);
+      assert.deepEqual(analyzed, route === "vision" ? [{ data: image.data, mimeType: image.mimeType }] : []);
+      assert.deepEqual(runtime.selected, route === "native" ? ["provider/backup"] : []);
+      await runtime.emit("turn_start");
+      await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] });
+      await runtime.emit("agent_settled");
+      assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+      assert.deepEqual(runtime.selected, route === "native" ? ["provider/backup", "provider/primary"] : []);
+      await runtime.emit("session_shutdown");
+    } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  });
+}
+
+test("custom input ignores user-only images and non-image content blocks", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-custom-no-images-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    let delegated = 0;
+    const runtime = harness(cwd, undefined, {
+      multimodal: ["provider/backup"],
+      visionAnalyzer: async () => { delegated += 1; throw new Error("unexpected image delegation"); },
+    });
+    const image = { type: "image", data: "not-a-custom-image", mimeType: "image/png" };
+    for (const content of ["custom text", [{ ...image, type: "text", text: "custom text" }]]) {
+      assert.equal(await runtime.emit("before_agent_start", {
+        messageType: "custom",
+        message: { customType: "other-extension", content },
+        images: [image],
+      }), undefined);
+    }
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(delegated, 0);
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
 test("blocked multimodal attached-image candidates delegate without touching healthy text fallbacks", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-vision-blocked-"));
   try {
@@ -428,8 +482,8 @@ test("agent_end is observational and retry exhaustion falls back only after sett
     assert.equal(consumeModelFailoverSettlement(arbitration?.recoveryId)?.outcome, "fallback-scheduled");
     assert.equal(snapshotModelFailoverSettlement(), undefined);
 
-    // Hidden custom triggerTurn does not emit before_agent_start; the handoff
-    // macrotask already transferred the fallback acquisition to this run.
+    // Pre-1.2.0 custom triggerTurn skips before_agent_start; the handoff
+    // macrotask prepares the fallback and turn_start completes the transfer.
     await runtime.emit("turn_start", { turnIndex: 1 });
     await runtime.emit("message_end", {
       message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
@@ -443,6 +497,159 @@ test("agent_end is observational and retry exhaustion falls back only after sett
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+for (const contentKind of ["string", "blocks"] as const) {
+  for (const outcome of ["success", "further-recovery"] as const) {
+    test(`Pi 1.2.0 custom ${contentKind} recovery retains the acquisition and supports ${outcome}`, async () => {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-custom-"));
+      try {
+        writeProjectConfig(cwd, {
+          enabled: true,
+          fallbackModels: { "provider/primary": ["provider/backup", "provider/last"] },
+        });
+        const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+        const runtime = harness(cwd, breaker);
+        await runtime.emit("session_start");
+        await runtime.emit("before_agent_start", { messageType: "user", prompt: "work" });
+        await runtime.emit("turn_start");
+        await runtime.emit("agent_end", {
+          messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+        });
+        await runtime.emit("agent_settled");
+        await runtime.flushScheduledHandoff();
+        assert.equal(runtime.handoffs.length, 1);
+        assert.deepEqual(runtime.handoffs[0]?.options, { triggerTurn: true });
+
+        const recovery = runtime.handoffs[0]!.message;
+        const acquired = [...breaker.acquiredModels];
+        // Use the emitted message, with no user prompt/images fields. Hosts
+        // may expose custom content as either text or text/image blocks.
+        const result = await runtime.emit("before_agent_start", {
+          messageType: "custom",
+          message: {
+            ...recovery,
+            content: contentKind === "string" ? recovery.content : [
+              { type: "image", data: "ignored-during-recovery", mimeType: "image/png" },
+              { type: "text", text: recovery.content },
+            ],
+          },
+        });
+        assert.equal(result, undefined);
+        assert.deepEqual(breaker.acquiredModels, acquired, "do not release/reacquire the fallback");
+        assert.deepEqual(runtime.selected, ["provider/backup"]);
+        // A duplicate old-run settlement between the custom hook and
+        // turn_start must still be fenced off.
+        await runtime.emit("agent_settled");
+        assert.deepEqual(breaker.acquiredModels, acquired);
+        assert.equal(runtime.handoffs.length, 1);
+
+        await runtime.emit("turn_start");
+        await runtime.emit("agent_end", {
+          messages: [outcome === "success"
+            ? { role: "assistant", stopReason: "stop", content: [] }
+            : { role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+        });
+        await runtime.emit("agent_settled");
+        assert.equal(snapshotModelFailoverSettlement()?.model, "provider/backup");
+        if (outcome === "success") {
+          assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+          assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+        } else {
+          assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+          assert.deepEqual(runtime.selected, ["provider/backup", "provider/last"], "preserve the original exhausted chain");
+          await runtime.flushScheduledHandoff();
+          assert.equal(runtime.handoffs.length, 2);
+          await runtime.emit("before_agent_start", { messageType: "custom", message: runtime.handoffs[1]!.message });
+          await runtime.emit("turn_start");
+          await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] });
+          await runtime.emit("agent_settled");
+          assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+          assert.equal(snapshotModelFailoverSettlement()?.model, "provider/last");
+        }
+        await runtime.emit("session_shutdown");
+      } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+    });
+  }
+}
+
+test("custom recovery retains a half-open fallback trial until successful settlement", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-custom-half-open-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    let now = 0;
+    const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000, now: () => now });
+    breaker.recordRetryableFailure(breaker.acquireCandidate("provider/backup"));
+    now = 60_000;
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start");
+    await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }] });
+    await runtime.emit("agent_settled");
+    await runtime.flushScheduledHandoff();
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.halfOpenTrialInProgress, true);
+    const acquired = [...breaker.acquiredModels];
+    await runtime.emit("before_agent_start", { messageType: "custom", message: runtime.handoffs[0]!.message });
+    assert.deepEqual(breaker.acquiredModels, acquired);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.halfOpenTrialInProgress, true);
+    await runtime.emit("turn_start");
+    await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] });
+    await runtime.emit("agent_settled");
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+for (const customKind of ["unrelated", "stale-recovery"] as const) {
+  test(`${customKind} custom text quoting a marker does not acknowledge the pending handoff`, async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-unrelated-custom-"));
+    try {
+      writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+      const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+      const runtime = harness(cwd, breaker);
+      await runtime.emit("before_agent_start", { prompt: "work" });
+      await runtime.emit("turn_start");
+      await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }] });
+      await runtime.emit("agent_settled");
+      const recoveryId = snapshotModelFailoverSettlement()!.recoveryId;
+      const acquiredCount = breaker.acquiredModels.length;
+      await runtime.emit("before_agent_start", {
+        messageType: "custom",
+        message: {
+          customType: customKind === "unrelated" ? "other-extension" : "maestro-model-failover",
+          content: [{ type: "text", text: `Quoted marker: [maestro-model-failover:${customKind === "unrelated" ? recoveryId : "stale-id"}]` }],
+        },
+      });
+      assert.equal(breaker.acquiredModels.length, acquiredCount + 1, "unrelated input starts its own acquisition");
+      await runtime.flushScheduledHandoff();
+      assert.equal(runtime.handoffs.length, 0, "superseded recovery must not be sent");
+      await runtime.emit("session_shutdown");
+    } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  });
+}
+
+test("legacy user recovery prompt retains the fallback acquisition", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-user-recovery-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start");
+    await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }] });
+    await runtime.emit("agent_settled");
+    await runtime.flushScheduledHandoff();
+    const acquired = [...breaker.acquiredModels];
+    await runtime.emit("before_agent_start", { prompt: runtime.handoffs[0]!.message.content });
+    assert.deepEqual(breaker.acquiredModels, acquired);
+    await runtime.emit("turn_start");
+    await runtime.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] });
+    await runtime.emit("agent_settled");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+    assert.equal(snapshotModelFailoverSettlement()?.model, "provider/backup");
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
 test("message_end rewrites stream_read_error so native same-model retries run before fallback", async () => {
@@ -586,8 +793,8 @@ test("no fallback chain configured: implicit candidates advance one settled run 
     await runtime.flushScheduledHandoff();
     assert.equal(runtime.handoffs.length, 1);
 
-    // Hidden custom triggerTurn starts the selected fallback without a
-    // before_agent_start event.
+    // Retain coverage for pre-1.2.0 hosts, where custom triggerTurn starts
+    // the selected fallback without a before_agent_start event.
     await runtime.emit("turn_start", { turnIndex: 1 });
     await runtime.emit("agent_end", {
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 500" }],

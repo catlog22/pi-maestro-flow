@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { AgentReadStoreRouter, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS } from "../src/agents-store.ts";
 import { resolveGlyphs, spinFrame } from "../src/icons.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "../src/tick-policy.ts";
 
@@ -53,6 +55,41 @@ test("shouldAnimateSidebar mirrors the static gate and includes lingering", () =
 	assert.equal(shouldAnimateSidebar(state({ staticMode: true, running: true })), false);
 	assert.equal(shouldAnimateSidebar(state({ staticMode: true, lingering: true })), false);
 	assert.equal(shouldAnimateSidebar(state({})), false);
+});
+
+test("V2 cleanup ticks expire the shadow roster and retain tombstones through their deadline in static mode", () => {
+	const router = new AgentReadStoreRouter();
+	router.applyRuntimeSnapshot({
+		version: 2, revision: 1, kind: "agent-runs-snapshot", cursor: 1,
+		source: { streamId: "runtime", revision: 1, generation: 1 }, agents: [],
+	});
+	for (let i = 0; i < 1000; i++) {
+		router.applyLegacyStarted({ correlationId: `agent-${i}`, agent: "general" }, 1);
+		router.applyLegacyComplete({ correlationId: `agent-${i}`, exitCode: 0 }, 1000);
+	}
+	assert.equal(router.legacy.size, 1000, "events do not eagerly prune");
+	assert.equal(router.current.size, 0, "V2 remains the rendered source");
+	const tickState = () => state({ staticMode: true, lingering: router.hasPendingCleanup() });
+	assert.equal(shouldRunTick(tickState()), true, "hidden shadow retention starts the loop");
+	assert.equal(router.prune(1000 + AGENT_LINGER_MS - 1), false);
+	assert.equal(router.prune(1000 + AGENT_LINGER_MS), true);
+	assert.equal(router.legacy.size, 0);
+	assert.equal(shouldRunTick(tickState()), true, "tombstone-only retention keeps cleanup running");
+	router.applyLegacyMessage({ correlationId: "agent-0", agent: "general", status: "running" }, 1000 + COMPLETED_TOMBSTONE_MS - 1);
+	assert.equal(router.legacy.size, 0, "late progress cannot resurrect an expired display row");
+	router.prune(1000 + COMPLETED_TOMBSTONE_MS);
+	assert.equal(shouldRunTick(tickState()), false, "cleanup stops only after tombstones expire");
+	router.applyLegacyStarted({ correlationId: "agent-0", agent: "general" }, 1000 + COMPLETED_TOMBSTONE_MS);
+	assert.equal(router.legacy.size, 1, "genuine restart remains allowed");
+});
+
+test("extension wires router cleanup into the tick and schedules shadow events before the V2 render gate", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /lingering: agentReads\.hasPendingCleanup\(\)/);
+	assert.match(source, /const agentsPruned = agentReads\.prune\(now\)/);
+	for (const name of ["Started", "Message", "Complete"]) {
+		assert.match(source, new RegExp(`agentReads\\.applyLegacy${name}\\(payload\\)\\) return;\\s*syncTick\\(\\);\\s*if \\(usingRuntimeV2\\) return;`));
+	}
 });
 
 test("agentActive remains API-compatible without driving periodic repaint", () => {

@@ -38,6 +38,7 @@ import {
   type CompactionSettingsSnapshot,
   type NewContextCompactionConfigPatch,
   type SoftCompactionConfigPatch,
+  type SummaryCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
 import {
   extractHeadlessArgs,
@@ -56,7 +57,7 @@ import {
 } from "../compaction/compaction-threshold.ts";
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
-type EditableCompactionField = Exclude<CompactionField, "enabled" | "newContext">;
+type EditableCompactionField = Exclude<CompactionField, "enabled" | "newContext" | "summary">;
 type SoftMechanismItem = "softLossless" | "softCacheGate" | "softTimeBased" | "softRelevance" | "softDedup";
 type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | SoftMechanismItem | "compactModel" | "newContext" | "payloadLimitBytes";
 type ConfigFieldItem = Exclude<MenuItem, "softEnabled" | SoftMechanismItem | "newContext">;
@@ -221,6 +222,7 @@ const CATALOGS = {
     "model.detail.stale": "Configured model is not in the available list; falls back at runtime",
     "model.detail.unconfigured": "Configured model · unconfigured, follows the current session model",
     "model.detail.fallback": "fallback",
+    "model.detail.summary": "Standalone summary · thinking {thinkingLevel} · timeout {timeoutMs} ms · {source}",
   },
   "zh-CN": {
     "command.description": "配置 Pi 与 Maestro 的自动压缩阈值",
@@ -377,6 +379,7 @@ const CATALOGS = {
     "model.detail.stale": "配置模型不在可用列表中，运行时回退",
     "model.detail.unconfigured": "配置模型 · 未配置，跟随当前会话模型",
     "model.detail.fallback": "当前会话模型",
+    "model.detail.summary": "独立摘要 · 思考 {thinkingLevel} · 超时 {timeoutMs} ms · {source}",
   },
 } as const;
 
@@ -400,6 +403,7 @@ interface ScopeDraft {
   model?: string;
   payloadLimitBytes?: string;
   newContext?: { enabled?: boolean };
+  summary?: SummaryCompactionConfigPatch;
   soft?: SoftCompactionConfigPatch;
 }
 
@@ -1031,6 +1035,11 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     } else {
       rows.push(fit(`${this.t("model.detail.unconfigured")}${option ? ` ${option.reference}` : ""}`, width));
     }
+    rows.push(fit(this.t("model.detail.summary", {
+      thinkingLevel: effective.summary.thinkingLevel,
+      timeoutMs: effective.summary.timeoutMs,
+      source: this.sourceLabel(effective.source.summary),
+    }), width));
     return rows;
   }
 
@@ -1428,7 +1437,7 @@ export function registerCompactionSettingsCommand(pi: ExtensionAPI): void {
       }
       if (!supportsCustomOverlay(ctx)) {
         ctx.ui.notify(
-          `${translateCompaction(getTuiLocale(), "command.needTui")} Headless: /maestro-compaction set [--scope=project|user] --enabled=on --reserve-tokens=N --keep-recent-tokens=N --model=p/m --payload-limit-bytes=N --soft=<json> --new-context=<json>；/maestro-compaction unset [--scope=...] <field>`,
+          `${translateCompaction(getTuiLocale(), "command.needTui")} Headless: /maestro-compaction set [--scope=project|user] --enabled=on --reserve-tokens=N --keep-recent-tokens=N --model=p/m --payload-limit-bytes=N --soft=<json> --new-context=<json> --summary=<json>；/maestro-compaction unset [--scope=...] <field>`,
           "error",
         );
         return;
@@ -1497,6 +1506,12 @@ function compactionPatchFromHeadless(
         patch.soft = value.value as SoftCompactionConfigPatch;
         break;
       }
+      case "summary": {
+        const value = jsonField(raw, "summary");
+        if ("error" in value) return value;
+        patch.summary = value.value as SummaryCompactionConfigPatch;
+        break;
+      }
       case "newContext": {
         const value = jsonField(raw, "new-context");
         if ("error" in value) return value;
@@ -1504,7 +1519,7 @@ function compactionPatchFromHeadless(
         break;
       }
       default:
-        return { error: `Unknown field --${key}（允许：enabled/model/reserve-tokens/keep-recent-tokens/payload-limit-bytes/soft/new-context/scope）` };
+        return { error: `Unknown field --${key}（允许：enabled/model/reserve-tokens/keep-recent-tokens/payload-limit-bytes/soft/new-context/summary/scope）` };
     }
   }
   return { patch };
@@ -1546,7 +1561,7 @@ async function applyHeadlessCompactionConfig(
     return;
   }
   if (Object.keys(built.patch).length === 0) {
-    ctx.ui.notify("没有可写入的字段：/maestro-compaction set [--scope=project|user] --enabled=on --reserve-tokens=N --keep-recent-tokens=N --model=p/m --payload-limit-bytes=N --soft=<json> --new-context=<json>", "warning");
+    ctx.ui.notify("没有可写入的字段：/maestro-compaction set [--scope=project|user] --enabled=on --reserve-tokens=N --keep-recent-tokens=N --model=p/m --payload-limit-bytes=N --soft=<json> --new-context=<json> --summary=<json>", "warning");
     return;
   }
   const validation = validateCompactionPatch(built.patch, ctx.model?.contextWindow, ctx.model?.maxTokens);
@@ -1610,6 +1625,7 @@ function toDraft(patch: CompactionConfigPatch): ScopeDraft {
     ...(patch.model !== undefined ? { model: patch.model } : {}),
     ...(patch.payloadLimitBytes !== undefined ? { payloadLimitBytes: String(patch.payloadLimitBytes) } : {}),
     ...(patch.newContext !== undefined ? { newContext: { ...patch.newContext } } : {}),
+    ...(patch.summary !== undefined ? { summary: { ...patch.summary } } : {}),
     ...(patch.soft !== undefined ? { soft: { ...patch.soft } } : {}),
   };
 }
@@ -1622,12 +1638,15 @@ function draftToPatch(draft: ScopeDraft): CompactionConfigPatch {
     ...(draft.model !== undefined ? { model: draft.model } : {}),
     ...(draft.payloadLimitBytes !== undefined ? { payloadLimitBytes: Number(draft.payloadLimitBytes) } : {}),
     ...(draft.newContext !== undefined ? { newContext: { ...draft.newContext } } : {}),
+    ...(draft.summary !== undefined ? { summary: { ...draft.summary } } : {}),
     ...(draft.soft !== undefined ? { soft: { ...draft.soft } } : {}),
   };
 }
 
 function draftEqual(left: ScopeDraft, right: ScopeDraft): boolean {
-  return COMPACTION_FIELDS.filter((field) => field !== "newContext").every((field) => left[field] === right[field])
+  return COMPACTION_FIELDS.filter((field) => field !== "newContext" && field !== "summary").every((field) => left[field] === right[field])
+    && left.summary?.thinkingLevel === right.summary?.thinkingLevel
+    && left.summary?.timeoutMs === right.summary?.timeoutMs
     && newContextDraftEqual(left.newContext, right.newContext)
     && softDraftEqual(left.soft, right.soft);
 }

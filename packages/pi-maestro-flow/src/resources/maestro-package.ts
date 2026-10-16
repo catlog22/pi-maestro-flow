@@ -82,14 +82,19 @@ export function loadBundledAgentsInstructions(
   return content || undefined;
 }
 
-export function registerMaestroPackageResources(pi: ExtensionAPI): void {
-  configureTeammateAgentsDiscovery();
-  const agentsPath = resolveBundledAgentsPath();
+export function registerMaestroPackageResources(
+  pi: ExtensionAPI,
+  packageJsonPath = resolveOwnPackageJson(),
+): void {
+  configureTeammateAgentsDiscovery(packageJsonPath);
+  const agentsPath = resolveBundledAgentsPath(packageJsonPath);
   const agentsInstructions = loadBundledAgentsInstructions(agentsPath);
 
   if (agentsPath && agentsInstructions) {
+    const path = agentsPath.replaceAll("\\", "/");
+    const directory = dirname(agentsPath).replaceAll("\\", "/");
     pi.on("before_agent_start", (event) => ({
-      systemPrompt: `${event.systemPrompt}\n\n<project_instructions path="${agentsPath}">\n${agentsInstructions}\n</project_instructions>`,
+      systemPrompt: `${event.systemPrompt}\n\n<project_instructions path="${path}" directory="${directory}">\n${agentsInstructions}\n</project_instructions>`,
     }));
   }
 }

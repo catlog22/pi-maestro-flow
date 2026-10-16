@@ -46,6 +46,7 @@ import {
 	type FullscreenController,
 } from "./fullscreen-controller.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
+import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { TodoOverlay } from "./todo-overlay.ts";
 import { AgentOverlay } from "./agent-overlay.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
@@ -697,7 +698,7 @@ export default function (pi: ExtensionAPI): void {
 		running,
 		agentActive: agents.hasActive(),
 		bashActive: bashBg.hasActive(),
-		lingering: agents.hasLingering(),
+		lingering: agentReads.hasPendingCleanup(),
 		ticking: tick !== undefined,
 	});
 	// True only while a redraw loop is actually running; widgets use it to avoid
@@ -715,13 +716,11 @@ export default function (pi: ExtensionAPI): void {
 			const now = Date.now();
 			nowSnapshot = now;
 			activeBashBgOverlay?.tick(now);
-			const agentCountBeforePrune = agents.size;
-			agents.snapshot(now);
-			const agentsPruned = agents.size !== agentCountBeforePrune;
+			const agentsPruned = agentReads.prune(now);
 			if (agentsPruned) endpoints.refreshLegacy();
 			if (needsTick()) {
 				// Static mode keeps the loop alive only so lingering rows can expire
-				// (prune is read-driven). The rows themselves are static, so skip the
+				// (including the hidden shadow and tombstones). The rows are static, so skip the
 				// full repaint and repaint just once when a prune removed something.
 				if (config.staticMode) {
 					if (agentsPruned) req();
@@ -1574,6 +1573,19 @@ export default function (pi: ExtensionAPI): void {
 					const branch = footerData.getGitBranch();
 					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
 					const glyphs = resolveGlyphs(config.icons.mode);
+					const now = nowSnapshot;
+					const bashBgStatus = renderBashBgSummary(
+						bashBg.snapshot(),
+						Math.max(1, width - 1),
+						theme,
+						FOOTER_UTILS,
+						{
+							glyphs,
+							spin: spinFrame(glyphs, now, isAnimating()),
+							now,
+							hideLiveDuration: config.staticMode,
+						},
+					)[0];
 					const totals = getUsageTotals(ctx.sessionManager.getEntries());
 					const usageStatus = config.usage.enabled && config.usage.footer
 						? usageSubsystem?.getStatus(theme, config.usage.barWidth)
@@ -1587,7 +1599,7 @@ export default function (pi: ExtensionAPI): void {
 						formatCwd(ctx.sessionManager.getCwd()),
 						cu?.percent ?? 0, cu?.tokens ?? 0, cu?.contextWindow ?? ctx.model?.contextWindow ?? 0,
 						refId(totals), config.currency ?? "", config.currencyRate ?? "",
-						branch ?? "", usageStatus ?? "",
+						branch ?? "", bashBgStatus ?? "", usageStatus ?? "",
 						extensionStatuses.map((status) => `${status.key}:${status.text}`).join("|"),
 						refId(maestroWorkflow), maestro.contentRevision,
 					].join(";");
@@ -1604,6 +1616,7 @@ export default function (pi: ExtensionAPI): void {
 						currency: config.currency,
 						currencyRate: config.currencyRate,
 						git: branch ?? undefined,
+						bashBgStatus,
 						usageStatus,
 						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,
 						maestroWorkflow,
@@ -1856,31 +1869,30 @@ export default function (pi: ExtensionAPI): void {
 				// session_start broadcast (and its query may have raced startup).
 				publishUiOwnership();
 				if (!isStartedPayload(payload) || !agentReads.applyLegacyStarted(payload)) return;
+				syncTick();
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
 				if (!syncActiveAgentSurface()) return;
-				syncTick();
 				req();
 			}),
 			pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
 				if (!isProgressPayload(payload) || !agentReads.applyLegacyMessage(payload)) return;
+				syncTick();
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
 				if (!syncActiveAgentSurface()) return;
-				syncTick();
 				req();
 			}),
 			pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
+				// Hidden legacy completions still need row/tombstone expiry while V2 renders.
 				if (!isCompletePayload(payload) || !agentReads.applyLegacyComplete(payload)) return;
+				syncTick();
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
 				if (!syncActiveAgentSurface()) return;
-				// A failure that arrives after the session went idle still needs a loop to
-				// expire it, so the tick is re-evaluated rather than assumed to be running.
-				syncTick();
 				req();
 			}),
 			pi.events.on(RUNTIME_READ_MODEL_SNAPSHOT_EVENT, (payload) => {
