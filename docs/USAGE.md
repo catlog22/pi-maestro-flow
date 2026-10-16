@@ -59,11 +59,13 @@
 
 ### 安装
 
-> **v0.34.0：** Flow 0.34.0、Backends 0.1.7、Teammate 2.10.0、Cockpit 0.24.4，其余包不变；引擎仍为 `maestro-flow >=0.5.91`（上游最新/本地 0.5.92，非精确 pin）。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
+> **v0.34.1：** 修复压缩预检的宿主模块加载；仅 Flow 升级，其他包不变。按用户要求跳过本版验证，见 [RELEASE.md](../RELEASE.md)。
+
+> **v0.34.0 基线：** Flow 0.34.0、Backends 0.1.7、Teammate 2.10.0、Cockpit 0.24.4，其余包不变；引擎仍为 `maestro-flow >=0.5.91`（上游最新/本地 0.5.92，非精确 pin）。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.34.0
+pi install npm:pi-maestro-flow@0.34.1
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
@@ -1361,7 +1363,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.34.0
+pi install npm:pi-maestro-flow@0.34.1
 
 # ─── 知识 ───
 maestro search "查询" --code

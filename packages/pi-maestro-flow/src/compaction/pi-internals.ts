@@ -1,5 +1,5 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export interface PiCompactionInternals {
   prepareCompaction(entries: unknown[], settings: {
@@ -15,9 +15,9 @@ let cachedInternals: Promise<PiCompactionInternals> | undefined;
 export function loadPiCompactionInternals(): Promise<PiCompactionInternals> {
   if (!cachedInternals) {
     const load = (async () => {
-      const packageEntryUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-      const distRoot = dirname(fileURLToPath(packageEntryUrl));
-      const module = await import(pathToFileURL(join(distRoot, "core", "compaction", "compaction.js")).href);
+      // Host aliases/virtual modules work even when the managed npm tree has no SDK.
+      const { getPackageDir } = await import("@earendil-works/pi-coding-agent");
+      const module = await import(pathToFileURL(join(getPackageDir(), "dist", "core", "compaction", "compaction.js")).href);
       if (typeof module.prepareCompaction !== "function") {
         throw new Error("Pi prepareCompaction() is unavailable");
       }

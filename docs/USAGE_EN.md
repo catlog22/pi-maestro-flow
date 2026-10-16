@@ -59,11 +59,13 @@
 
 ### Install
 
-> **v0.34.0:** Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0, Cockpit 0.24.4; other packages unchanged. The engine remains `maestro-flow >=0.5.91` (latest upstream/local 0.5.92, not an exact pin). Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
+> **v0.34.1:** fixes compaction preflight host-module loading. Only Flow changes; verification was skipped at the user's request. See [RELEASE.md](../RELEASE.md).
+
+> **v0.34.0 baseline:** Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0, Cockpit 0.24.4; other packages unchanged. The engine remains `maestro-flow >=0.5.91` (latest upstream/local 0.5.92, not an exact pin). Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.34.0
+pi install npm:pi-maestro-flow@0.34.1
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
@@ -1401,7 +1403,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.34.0
+pi install npm:pi-maestro-flow@0.34.1
 
 # ─── Knowledge ───
 maestro search "query" --code

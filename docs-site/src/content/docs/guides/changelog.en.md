@@ -5,7 +5,15 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current version: v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability.** Node.js minimum 22.19.0 and Pi 0.99.0 baseline are unchanged; existing native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions/install commands retain their original values; this release's tests, build and publication evidence belong in repository RELEASE.md, not a premature pass claim here.
+> **Current version: v0.34.1 — Pi Host Compaction Loading Fix.** Verification was skipped at the user's request. Node.js minimum 22.19.0 and Pi 0.99.0 baseline are unchanged; existing native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions/install commands retain their original values; this release's tests, build and publication evidence belong in repository RELEASE.md, not a premature pass claim here.
+
+## v0.34.1 — Pi Host Compaction Loading Fix
+
+- Flow **0.34.1** only; Teammate **2.10.0**, Cockpit **0.24.4** and all other packages remain unchanged.
+- Compaction preflight loads Pi internals through host `getPackageDir()`, supporting managed installations without a local SDK and host virtual modules.
+- Two regression cases are added and registered. Tests, typechecks, documentation builds and install/startup smoke were skipped at the user's request; no runtime acceptance is claimed.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.34.1`. Close Pi first and restart afterward.
 
 ## v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability
 

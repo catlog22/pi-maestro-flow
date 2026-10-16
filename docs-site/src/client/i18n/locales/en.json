@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.34.0 — Browser Recording, Compaction Summaries & Runtime Stability. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.34.0",
+    "title": "v0.34.1 — Pi Host Compaction Loading Fix (verification skipped). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.34.1",
     "close": "Dismiss"
   },
   "accessibility": {

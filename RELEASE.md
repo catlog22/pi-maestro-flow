@@ -1,3 +1,37 @@
+# v0.34.1 — Pi Host Compaction Loading Fix
+
+> Fast patch release: the user explicitly authorized skipping verification for
+> this version. Tests, typechecks, documentation builds, packaging dry-runs and
+> registry install/startup smoke were not run. No runtime acceptance is claimed.
+
+## Changes
+
+- Resolve compaction internals through the Pi host's `getPackageDir()` instead
+  of requiring SDK package resolution inside the managed npm tree. This supports
+  host aliases and virtual modules without installing a private Pi SDK copy.
+- Include both new regression cases in `test:compaction`: managed installation
+  without a local SDK and host-provided virtual modules. These cases are not
+  claimed executed for this release.
+- Source: `packages/pi-maestro-flow/src/compaction/pi-internals.ts` and
+  `packages/pi-maestro-flow/test/pi-internals.test.mjs`.
+- Publish **pi-maestro-flow 0.34.1** only. Teammate **2.10.0**, Cockpit **0.24.4**,
+  all other packages, engine range and optional host peers remain unchanged.
+- Includes all pending working-tree changes since **v0.34.0**, plus synchronized
+  version, lockfile, installation commands and bilingual release banners.
+
+## Install / upgrade
+
+```bash
+pi install npm:pi-maestro-flow@0.34.1
+```
+
+Close Pi before upgrading and restart afterward. This patch does not establish
+passing video, fresh-install or startup acceptance for v0.34.0 or v0.34.1.
+
+---
+
+## Historical v0.34.0 notes (not v0.34.1 acceptance)
+
 # v0.34.0 — Browser Recording, Compaction & Runtime Stability
 
 > Scoped Windows x64 / Node 22.22.0 verification. **The user explicitly accepted
