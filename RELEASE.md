@@ -3,8 +3,10 @@
 > Scoped Windows x64 / Node 22.22.0 verification. **The user explicitly accepted
 > the unverified real-video encoding case for this release**: FFmpeg is absent,
 > temporary installation stalled, and a bounded binary download timed out.
-> This is not a passing recording/decoding test. Registry startup acceptance
-> remains a separate release gate; v0.33.0's startup waiver does not apply.
+> This is not a passing recording/decoding test. **The user separately accepted
+> incomplete registry install/startup acceptance for v0.34.0**, authorizing its
+> tag and GitHub Release after the 600-second install timeout. Neither waiver
+> is inferred from v0.33.0; neither failure is labelled a passing smoke.
 
 ## Overview
 
@@ -73,7 +75,8 @@ inference and credential-dependent features are not claimed verified.
 
 ## Verification
 
-- **1519 unique selected tests passed**, **9 existing platform/environment skips**,
+- **1519 unique selected tests passed**, **9 selected skips** (7 POSIX cases
+  and 2 Teammate cases),
   and **one real-video integration case failed for missing FFmpeg**, explicitly
   accepted by the user. No test was disabled to obtain a pass.
 - Flow: **905 passed**, **7 POSIX skips**, **1 unaccepted-by-test-runner video
@@ -98,8 +101,40 @@ inference and credential-dependent features are not claimed verified.
   parsing corrected the harness and remaining packages were inspected. All ten
   unchanged workspace tarballs match npm; changed packages receive new versions.
 
-Artifact hashes and registry startup results will be recorded after packaging
-and publication; this section does not predeclare those checks as passed.
+### Locked artifacts and publication
+
+The release snapshot is commit **`2b021bf9`**. Each immutable tarball passed
+`npm publish --dry-run`, bundles settings-core but no private Pi host SDK/typebox
+copy, and was published in dependency order: Teammate → Cockpit → Flow. Flow's
+four on-demand instruction references are present. Registry SHA-1s match below.
+Teammate initially returned HTTP **202**, followed by temporary metadata 404s;
+publication was observed after processing, without republishing the version.
+
+| Package | Files | Packed / unpacked bytes | Registry-matched SHA-1 |
+|---|---:|---:|---|
+| pi-maestro-teammate@2.10.0 | 492 | 1259610 / 5625114 | `37a25bd94adc8fe23664758ec99add5810872201` |
+| pi-cockpit@0.24.4 | 115 | 332933 / 1249701 | `06a4edf363c1eeb201136145dd1137bbb9897a05` |
+| pi-maestro-flow@0.34.0 | 1177 | 3861994 / 14858045 | `d5b20a950698558899cce1349abf995272446967` |
+
+### Incomplete registry installation/startup acceptance
+
+- A fresh consumer at `D:/tmp/pi-registry034-vb7Vgw`, with isolated `HOME` and
+  `USERPROFILE`, attempted registry installation of Flow **0.34.0** and explicit
+  Pi **0.99.0** host packages. It used `--legacy-peer-deps --omit=optional
+  --ignore-scripts`, with no workspace links and a **600-second** install bound.
+- The install timed out with **ETIMEDOUT**. Manifests for Flow **0.34.0**,
+  Teammate **2.10.0**, Cockpit **0.24.4** and Pi **0.99.0** were present, but this
+  does not prove installation completed. npm logs showed cache misses and some
+  tarball downloads taking **45–110 seconds**; the complete timeout cause has
+  not been localized. A runtime defect has not been excluded.
+- Because install did not pass, **Flow postinstall and the offline RPC suite
+  startup/tool-registration probe were not executed**. No model inference was
+  attempted. The `pi install` managed wrapper and optional/native installations
+  are also not claimed verified.
+- The cumulative install/startup failure history was inspected and no further
+  retry or timeout extension was made. The user then **explicitly accepted this
+  incomplete acceptance scope for v0.34.0** and authorized its tag/GitHub Release.
+  npm publication and matching hashes establish artifact identity, not readiness.
 
 ## Install / upgrade
 
