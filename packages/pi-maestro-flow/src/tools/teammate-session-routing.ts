@@ -32,30 +32,31 @@ function isKnownTaskType(value: string): boolean {
 }
 
 export const TeammateSessionRoutingParams = Type.Object({
-  mappings: Type.Optional(Type.Record(
-    Type.String({ description: "taskType: explore | analysis | debug | planning | development | review | testing" }),
-    Type.Union([
+  // NOTE: maps use Object + additionalProperties instead of Type.Record.
+  // Record compiles to patternProperties, which Gemini and xAI function
+  // declarations reject with 400. Keys are narrowed to known taskTypes at
+  // runtime in normalizeRulesInput().
+  mappings: Type.Optional(Type.Object({}, {
+    additionalProperties: Type.Union([
       Type.String({ description: "canonical teammate model registration id (e.g. maestro-openai/gpt-5.6-sol)" }),
       Type.Null({ description: "clear the session override for this taskType, falling back to project/global config" }),
     ]),
-    { description: "taskType → model overrides for this session. null clears one entry." },
-  )),
-  fallbackModels: Type.Optional(Type.Record(
-    Type.String({ description: "taskType" }),
-    Type.Union([
+    description: "taskType → model overrides for this session. null clears one entry.",
+  })),
+  fallbackModels: Type.Optional(Type.Object({}, {
+    additionalProperties: Type.Union([
       Type.Array(Type.String(), { description: "ordered fallback model ids tried after the primary fails" }),
       Type.Null({ description: "clear the session fallback override for this taskType" }),
     ]),
-    { description: "taskType → fallback model chain for this session" },
-  )),
-  thinkingLevels: Type.Optional(Type.Record(
-    Type.String({ description: "taskType" }),
-    Type.Union([
+    description: "taskType → fallback model chain for this session",
+  })),
+  thinkingLevels: Type.Optional(Type.Object({}, {
+    additionalProperties: Type.Union([
       Type.String({ description: "off | minimal | low | medium | high | xhigh | max" }),
       Type.Null({ description: "clear the session thinking override for this taskType" }),
     ]),
-    { description: "taskType → thinking depth for this session" },
-  )),
+    description: "taskType → thinking depth for this session",
+  })),
   clear: Type.Optional(Type.Boolean({
     description: "When true, drop ALL session overrides for this session (ignore mappings/fallbackModels/thinkingLevels). Use to reset before reconfiguring or at session end.",
   })),

@@ -94,6 +94,16 @@ export const ComputerUseParams = Type.Object({
   ],
 } as Record<string, unknown>);
 
+// Action-specific requirements (source/window_id per source kind, x/y per
+// pointer action, query/keys/text/template_path per action) are enforced at
+// runtime by validateComputerUseParams() in execute(), not in the model-facing
+// schema. The host validates against the full ComputerUseParams; the
+// model-facing declaration must omit conditionals (allOf/if/then/not), which
+// Gemini and xAI function declarations reject with 400. Same precedent as
+// TodoModelParams in src/extension/schemas.ts.
+const { allOf: _computerUseConditions, ...computerUseModelSchema } = ComputerUseParams as unknown as Record<string, unknown>;
+export const ComputerUseModelParams = Type.Unsafe<ComputerUseParamsType>(computerUseModelSchema);
+
 export type ComputerUseParamsType = Static<typeof ComputerUseParams>;
 
 export interface ComputerUseToolDetails {
@@ -107,8 +117,8 @@ const POINTER_ACTIONS = new Set(["click", "double_click", "right_click", "move",
 const VISION_ACTIONS = new Set(["ocr", "detect"]);
 const SOURCE_ACTIONS = new Set(["screenshot", "ocr", "detect", "find_block"]);
 
-export type ComputerUseToolDefinition = ToolDefinition<typeof ComputerUseParams, ComputerUseToolDetails> & {
-  execute: ToolDefinition<typeof ComputerUseParams, ComputerUseToolDetails>["execute"] & (
+export type ComputerUseToolDefinition = ToolDefinition<typeof ComputerUseModelParams, ComputerUseToolDetails> & {
+  execute: ToolDefinition<typeof ComputerUseModelParams, ComputerUseToolDetails>["execute"] & (
     (id: string, params: never, signal: AbortSignal, onUpdate: undefined, ctx: ExtensionContext) => Promise<AgentToolResult<ComputerUseToolDetails>>
   );
 };
@@ -128,7 +138,7 @@ export function createComputerUseTool(manager: ComputerUseManagerLike = computer
       "Coordinates are physical pixels. window_client_physical is resolved from the verified client origin (ClientToScreen), never the outer window bounds. Windows DPI and macOS Retina scaling can change logical coordinates.",
       "Never retry a near-zero, timeout, foreground, stale-control, permission, Wayland, or network-game failure blindly. Destructive input requires allow_destructive=true.",
     ],
-    parameters: ComputerUseParams,
+    parameters: ComputerUseModelParams,
     executionMode: "sequential",
     async execute(_id, rawParams, signal, _onUpdate, ctx): Promise<AgentToolResult<ComputerUseToolDetails>> {
       const validation = validateComputerUseParams(rawParams as unknown);
