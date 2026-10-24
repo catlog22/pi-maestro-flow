@@ -1213,6 +1213,7 @@ async function reviewPlan(
       const reviewedRevision = latestRevision;
       const outcome = await openRefinePanel(extensionApi, ctx, {
         markdown: latestPlan ?? "",
+        revision: reviewedRevision,
         initialRole,
         session: refineSession,
         signal,
@@ -1246,6 +1247,12 @@ async function reviewPlan(
           const saved = await savePlan(ctx, output, latestRevision, operation);
           if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
           if (saved) {
+            // Only a committed PlanStore write may report the business terminal.
+            await outcome.finalize?.({
+              action: "apply",
+              turnId: refineSession.turns.at(-1)?.turnId,
+              terminal: "applied",
+            });
             refineLatestOutput = undefined;
             refineLatestRole = undefined;
             refineLatestAppliesAs = undefined;
@@ -1262,7 +1269,9 @@ async function reviewPlan(
         refineLatestRole = undefined;
         refineLatestAppliesAs = undefined;
         refineLatestRoleLabel = undefined;
-        return deliverPlanDiscussion(ctx, handoffDelivery, feedback);
+        const discussionResult = deliverPlanDiscussion(ctx, handoffDelivery, feedback);
+        await outcome.finalize?.({ action: "cancel", terminal: "cancelled" });
+        return discussionResult;
       }
       if (outcome.action === "discard" || outcome.action === "cancel") {
         refineLatestOutput = undefined;

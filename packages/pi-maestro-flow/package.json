@@ -82,6 +82,7 @@
   "exports": {
     "./ask-transport": "./src/ask-transport.ts",
     "./plan-transport": "./src/plan-transport.ts",
+    "./refine-transport": "./src/refine-transport.ts",
     "./gui": "./src/gui/index.ts",
     "./gui/client": "./src/gui/client.ts",
     "./compaction/settings": "./src/compaction/compaction-settings.ts",

@@ -22,6 +22,9 @@ import {
   buildReviewPrompt,
 } from "./plan-review.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
+import type { RefineTransportRequest, RefineTransportResult } from "../refine-transport.ts";
+import { getRefineTransports } from "../refine-transport.ts";
+import { createRefinePresenterState } from "../refine-presenter.ts";
 
 const DEFAULT_REFINE_TIMEOUT_MS = 180_000;
 /** Cap each prior turn injected into the next role prompt. */
@@ -33,6 +36,8 @@ export type RefineRole = "reviewer" | "decomposer" | "optimizer" | "brainstormer
 export type RefineAppliesAs = "feedback" | "draft";
 
 export interface RefineTurn {
+  /** Stable identity for remote presentation; older local sessions may omit it. */
+  turnId?: string;
   role: RefineRole;
   modelLabel: string;
   /** User instruction for this run; empty for a bare first pass. */
@@ -75,6 +80,7 @@ export interface RunRefineOptions {
 
 export interface OpenRefinePanelOptions {
   markdown: string;
+  revision?: number;
   initialRole?: RefineRole;
   session?: RefineSession;
   signal?: AbortSignal;
@@ -87,11 +93,16 @@ export interface RefinePanelResult {
   latestOutput?: string;
   latestRole?: RefineRole;
   latestAppliesAs?: RefineAppliesAs;
+  /**
+   * Remote presentation only: complete the business terminal after the caller
+   * has committed the Apply through the PlanStore. Absent for local TUI.
+   */
+  finalize?: (result: RefineTransportResult) => void | Promise<void>;
 }
 
-type PlanRefineContext = Pick<
+export type PlanRefineContext = Pick<
   ExtensionContext,
-  "cwd" | "hasUI" | "ui" | "mode" | "model" | "modelRegistry" | "isProjectTrusted"
+  "cwd" | "hasUI" | "ui" | "mode" | "model" | "modelRegistry" | "isProjectTrusted" | "sessionManager"
 >;
 
 const REFINE_ROLE_ORDER: RefineRole[] = ["reviewer", "decomposer", "optimizer", "brainstormer"];
@@ -295,6 +306,67 @@ export function cycleRole(role: RefineRole, direction: 1 | -1): RefineRole {
 }
 
 /**
+ * Present the refine session on a registered remote transport. Returns undefined
+ * when no transport accepts, leaving the local TUI in control. The returned
+ * promise resolves with the user's presentation choice; `finalize` on the result
+ * commits the business terminal once the PlanStore has been updated.
+ */
+function openRemoteRefinePanel(
+  pi: ExtensionAPI,
+  ctx: PlanRefineContext,
+  options: OpenRefinePanelOptions,
+  session: RefineSession,
+): { promise: Promise<RefinePanelResult> } | undefined {
+  const signal = options.signal ?? new AbortController().signal;
+  for (const transport of getRefineTransports()) {
+    try {
+      const state = createRefinePresenterState({
+        sessionId: ctx.sessionManager.getSessionId(),
+        markdown: options.markdown,
+        revision: options.revision ?? 0,
+        session,
+        signal,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        ...(options.onOutput ? { onOutput: options.onOutput } : {}),
+      });
+      const request: RefineTransportRequest = {
+        sessionId: ctx.sessionManager.getSessionId(),
+        refineSessionId: state.refineSessionId,
+        operationId: state.operationId,
+        target: state.target,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        markdown: options.markdown,
+        revision: options.revision ?? 0,
+        session,
+        initialRole: session.currentRole,
+        signal,
+        handleAction: (action) => state.handleAction(pi, ctx, action),
+      };
+      const handle = transport.open(request);
+      if (!handle) continue;
+      state.start(handle);
+      return {
+        promise: handle.promise.then((result) => ({
+          action: result.action,
+          session,
+          latestOutput: state.latestTurn()?.output,
+          latestRole: state.latestTurn()?.role,
+          latestAppliesAs: state.latestTurn()?.appliesAs,
+          ...(result.action === "apply"
+            ? { finalize: (committed: RefineTransportResult) => state.finalize(committed) }
+            : {}),
+        })),
+      };
+    } catch (error) {
+      console.error(`[maestro] Refine transport open failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Drive the Review & Refine panel. Delegates the TUI rendering/interaction to
  * `tui/plan-refine-overlay.ts` while owning the model picker and the run loop.
  * Returns the final session, selected action, and latest output metadata.
@@ -310,6 +382,9 @@ export async function openRefinePanel(
     ? { ...options.session, turns: [...options.session.turns] }
     : createRefineSession(initialRole, sessionModelLabel);
   if (!session.currentModel.model) session.currentModel = { model: resolveSessionModelKey(ctx), label: sessionModelLabel };
+
+  const remote = openRemoteRefinePanel(pi, ctx, options, session);
+  if (remote) return remote.promise;
 
   const { renderRefineOverlay } = await import("../tui/plan-refine-overlay.ts");
   const result = await renderRefineOverlay(ctx, {
