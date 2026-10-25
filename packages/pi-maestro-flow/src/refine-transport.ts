@@ -144,6 +144,7 @@ interface RefineTransportRegistry {
   transports: RefineTransport[];
 }
 
+/** Retrieve or initialize the process-global Refine transport registry. */
 function registry(): RefineTransportRegistry {
   const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
   const existing = globals[registryKey] as RefineTransportRegistry | undefined;
@@ -163,6 +164,7 @@ export function registerRefineTransport(transport: RefineTransport): () => void 
   };
 }
 
+/** Return an immutable snapshot of all currently registered Refine transports. */
 export function getRefineTransports(): readonly RefineTransport[] {
   return [...registry().transports];
 }

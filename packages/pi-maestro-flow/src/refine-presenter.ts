@@ -56,6 +56,7 @@ interface RefinePresenterState {
   finalize(result: RefineTransportResult): void;
 }
 
+/** Convert an internal Refine turn into a transport-serializable turn with a stable turn ID. */
 function toTransportTurn(turn: RefineTurn, index: number): RefineTransportTurn {
   return {
     ...turn,
@@ -150,6 +151,7 @@ export function createRefinePresenterState(options: RemoteRefineOptions): Refine
         send({ type: "action_result", actionId: action.actionId, status: "accepted" });
         settle();
         send({ type: "terminal", status: "discarded" });
+        handle?.finish({ action: "discard" });
         return;
       }
       if (action.type === "apply") {
@@ -169,7 +171,15 @@ export function createRefinePresenterState(options: RemoteRefineOptions): Refine
         return;
       }
       const spec = REFINE_ROLES[action.role as RefineRole];
-      if (!spec || !action.model.trim()) {
+      if (!spec || typeof action.model !== "string" || !action.model.trim() || typeof action.userInput !== "string") {
+        send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
+        return;
+      }
+
+      let prompt: string;
+      try {
+        prompt = spec.buildPrompt(options.markdown, session.turns, action.userInput);
+      } catch {
         send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
         return;
       }
@@ -182,12 +192,22 @@ export function createRefinePresenterState(options: RemoteRefineOptions): Refine
       send({ type: "action_result", actionId: action.actionId, status: "accepted" });
       send({ type: "status", status: "running" });
 
-      const run = await runRefineSubagent(pi, ctx, {
-        prompt: spec.buildPrompt(options.markdown, session.turns, action.userInput),
-        model: action.model,
-        taskType: spec.taskType,
-        signal: runSignal,
-      });
+      let run: Awaited<ReturnType<typeof runRefineSubagent>>;
+      try {
+        run = await runRefineSubagent(pi, ctx, {
+          prompt,
+          model: action.model,
+          taskType: spec.taskType,
+          signal: runSignal,
+        });
+      } catch {
+        if (running === controller) running = undefined;
+        if (!terminal) {
+          send({ type: "action_result", actionId: action.actionId, status: "failed", errorCode: "run_failed" });
+          send({ type: "status", status: "ready" });
+        }
+        return;
+      }
       if (running !== controller || terminal) return;
       running = undefined;
 

@@ -1244,15 +1244,24 @@ async function reviewPlan(
         }
         if (refineLatestAppliesAs === "draft") {
           // Optimizer-style roles return a full draft: write it directly as the new current.md.
-          const saved = await savePlan(ctx, output, latestRevision, operation);
+          let saved: LoadedPlan | undefined;
+          try {
+            saved = await savePlan(ctx, output, latestRevision, operation);
+          } catch (error) {
+            ctx.ui.notify(`Failed to save refined plan: ${error instanceof Error ? error.message : String(error)}`, "warning");
+          }
           if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
           if (saved) {
             // Only a committed PlanStore write may report the business terminal.
-            await outcome.finalize?.({
-              action: "apply",
-              turnId: refineSession.turns.at(-1)?.turnId,
-              terminal: "applied",
-            });
+            try {
+              await outcome.finalize?.({
+                action: "apply",
+                turnId: refineSession.turns.at(-1)?.turnId,
+                terminal: "applied",
+              });
+            } catch (error) {
+              console.error(`[maestro] Failed to finalize applied refine: ${error instanceof Error ? error.message : String(error)}`);
+            }
             refineLatestOutput = undefined;
             refineLatestRole = undefined;
             refineLatestAppliesAs = undefined;
@@ -1260,6 +1269,11 @@ async function reviewPlan(
             refineSession = undefined;
             refineSessionRevision = -1;
             ctx.ui.notify("Refine result applied to the Plan draft.", "info");
+          } else {
+            await outcome.finalize?.({
+              action: "apply",
+              terminal: "failed",
+            });
           }
           continue;
         }

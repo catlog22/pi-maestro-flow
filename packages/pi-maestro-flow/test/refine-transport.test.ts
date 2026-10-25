@@ -101,6 +101,23 @@ test("remote refine opens with an authoritative snapshot before any user action"
   }
 });
 
+test("discard resolves the panel with a discard action and emits discarded terminal", async () => {
+  const h = harness();
+  try {
+    const pending = openRefinePanel(stubPi(), refineContext, { markdown: PLAN, revision: 5 });
+    await new Promise((resolve) => setImmediate(resolve));
+    await h.actions({ type: "discard", actionId: "a-discard" });
+    const terminal = h.events.find((event) => event.type === "terminal");
+    assert.equal(terminal?.type, "terminal");
+    if (terminal?.type !== "terminal") throw new Error("expected terminal");
+    assert.equal(terminal.status, "discarded");
+    const outcome = await pending;
+    assert.equal(outcome.action, "discard");
+  } finally {
+    h.dispose();
+  }
+});
+
 test("duplicate action ids are not executed twice and do not emit a second result", async () => {
   const h = harness();
   try {

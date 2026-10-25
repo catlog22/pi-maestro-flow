@@ -348,16 +348,21 @@ function openRemoteRefinePanel(
       if (!handle) continue;
       state.start(handle);
       return {
-        promise: handle.promise.then((result) => ({
-          action: result.action,
-          session,
-          latestOutput: state.latestTurn()?.output,
-          latestRole: state.latestTurn()?.role,
-          latestAppliesAs: state.latestTurn()?.appliesAs,
-          ...(result.action === "apply"
-            ? { finalize: (committed: RefineTransportResult) => state.finalize(committed) }
-            : {}),
-        })),
+        promise: handle.promise
+          .then((result) => ({
+            action: result.action,
+            session,
+            latestOutput: state.latestTurn()?.output,
+            latestRole: state.latestTurn()?.role,
+            latestAppliesAs: state.latestTurn()?.appliesAs,
+            ...(result.action === "apply"
+              ? { finalize: (committed: RefineTransportResult) => state.finalize(committed) }
+              : {}),
+          }))
+          .catch((error) => {
+            console.error(`[maestro] Refine remote transport rejected: ${error instanceof Error ? error.message : String(error)}`);
+            return { action: "cancel" as const, session };
+          }),
       };
     } catch (error) {
       console.error(`[maestro] Refine transport open failed: ${error instanceof Error ? error.message : String(error)}`);
