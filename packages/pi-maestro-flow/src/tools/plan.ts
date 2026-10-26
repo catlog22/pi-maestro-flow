@@ -1292,6 +1292,11 @@ async function reviewPlan(
         refineLatestRole = undefined;
         refineLatestAppliesAs = undefined;
         refineLatestRoleLabel = undefined;
+        // The mirror must learn the session ended even when the user walks away.
+        await outcome.finalize?.({
+          action: outcome.action,
+          terminal: outcome.action === "discard" ? "discarded" : "cancelled",
+        });
         if (outcome.action === "discard") {
           ctx.ui.notify("Refine result discarded; returning to the Plan preview.", "info");
         }

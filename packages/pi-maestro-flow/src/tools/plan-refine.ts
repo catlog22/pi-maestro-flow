@@ -22,11 +22,7 @@ import {
   buildReviewPrompt,
 } from "./plan-review.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
-import type {
-  RefineTransportHandle,
-  RefineTransportRequest,
-  RefineTransportResult,
-} from "../refine-transport.ts";
+import type { RefineTransportRequest, RefineTransportResult } from "../refine-transport.ts";
 import { getRefineTransports } from "../refine-transport.ts";
 import type { RefinePresenterState } from "../refine-presenter.ts";
 import { createRefinePresenterState } from "../refine-presenter.ts";
@@ -319,7 +315,7 @@ function openRemoteRefinePanel(
   ctx: PlanRefineContext,
   options: OpenRefinePanelOptions,
   session: RefineSession,
-): { state: RefinePresenterState; handle: RefineTransportHandle } | undefined {
+): RefinePresenterState | undefined {
   const transports = getRefineTransports();
   if (transports.length === 0) return undefined;
   const signal = options.signal ?? new AbortController().signal;
@@ -351,7 +347,7 @@ function openRemoteRefinePanel(
       const handle = transport.open(request);
       if (!handle) continue;
       state.start(handle);
-      return { state, handle };
+      return state;
     } catch (error) {
       console.error(`[maestro] Refine transport open failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -377,14 +373,14 @@ export async function openRefinePanel(
   if (!session.currentModel.model) session.currentModel = { model: resolveSessionModelKey(ctx), label: sessionModelLabel };
 
   // The local overlay is the authority; a remote transport only mirrors it.
-  const remote = openRemoteRefinePanel(ctx, options, session);
+  const mirror = openRemoteRefinePanel(ctx, options, session);
 
   const { renderRefineOverlay } = await import("../tui/plan-refine-overlay.ts");
   const result = await renderRefineOverlay(ctx, {
     markdown: options.markdown,
     session,
     roles: REFINE_ROLES,
-    ...(remote ? { mirror: remote.state.mirror } : {}),
+    ...(mirror ? { mirror: mirror.mirror } : {}),
     pickModel: async () => {
       const models = await listAvailableReviewModels(ctx);
       const picked = await pickReviewModel(ctx, models, options.signal);
@@ -417,29 +413,13 @@ export async function openRefinePanel(
     signal: options.signal,
   });
 
-  // Close the mirror exactly once: the local overlay already decided the outcome.
-  if (remote) {
-    try {
-      await remote.handle.cancel("tui_answered");
-    } catch {
-      // A detached transport must not change the local result.
-    }
-  }
-
   const lastTurn = result.session.turns.at(-1);
   return {
     ...result,
-    ...(remote && result.action === "apply"
+    ...(mirror
       ? {
           finalize: (committed: RefineTransportResult) => {
-            remote.state.finalize(committed);
-          },
-        }
-      : {}),
-    ...(remote && result.action !== "apply"
-      ? {
-          finalize: (committed: RefineTransportResult) => {
-            remote.state.finalize({
+            mirror.finalize({
               ...committed,
               terminal: committed.terminal ?? (result.action === "discard" ? "discarded" : "cancelled"),
             });

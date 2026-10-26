@@ -165,6 +165,29 @@ test("apply stays a presentation request: no terminal until the caller finalizes
   }
 });
 
+test("the business terminal reaches the mirror even after the local overlay closed", async () => {
+  const h = harness();
+  const overlay = overlayUi();
+  try {
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 13 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    overlay.close({ action: "discard", session: createRefineSession("reviewer", "p/m") });
+    const outcome = await pending;
+    assert.equal(outcome.action, "discard");
+    // The mirror must stay attached until finalize: cancelling the transport here
+    // would detach the Host pending entry and silently drop the terminal frame.
+    assert.equal(h.cancelCount(), 0);
+    assert.ok(outcome.finalize, "a remote session must expose finalize");
+    outcome.finalize?.({ action: "discard", terminal: "discarded" });
+    const terminal = h.events.find((event) => event.type === "terminal");
+    assert.equal(terminal?.type, "terminal");
+    if (terminal?.type !== "terminal") throw new Error("expected terminal");
+    assert.equal(terminal.status, "discarded");
+  } finally {
+    h.dispose();
+  }
+});
+
 test("a failing transport never removes the local refine path", async () => {
   const events: RefineTransportEvent[] = [];
   const overlay = overlayUi();
