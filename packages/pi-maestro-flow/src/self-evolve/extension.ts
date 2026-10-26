@@ -584,7 +584,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     const currentProject = projectNameFor(ctx.cwd);
     const resolved = await loadResolvedSignals();
     const reviewedIds = new Set<string>();
-    for (const review of (await loadRecentReviews(config.maxReviewFiles))) {
+    for (const review of (await loadRecentReviews())) {
       if (review.sessionId === currentSessionId && review.signalIds) {
         for (const id of review.signalIds) reviewedIds.add(id);
       }
@@ -781,6 +781,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
    * `unknown` by supplying a candidateType + title + summary.
    */
   function resolvedIsActionable(signal: ResolvedSignal): boolean {
+    if (signal.enrichmentStatus === "semantic" && !signal.knowledge?.trim()) return false;
     if (typeof signal.suggestion === "string" && signal.suggestion.length > 0) return true;
     if ((signal.enrichmentStatus === "semantic" || signal.capturePolicyApplied) && signal.candidateType !== "unknown") return true;
     return false;
@@ -811,7 +812,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   }
 
   /** Load the most recent review records (reverse chronological). */
-  async function loadRecentReviews(limit: number): Promise<SelfEvolveReview[]> {
+  async function loadRecentReviews(limit?: number): Promise<SelfEvolveReview[]> {
     try {
       const dir = reviewsDirPath(resolvedOutputRoot());
       const names = (await readdir(dir))
@@ -833,7 +834,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           // skip malformed lines
         }
       }
-      return reviews.slice(-limit);
+      return limit === undefined ? reviews : reviews.slice(-limit);
     } catch {
       return [];
     }
@@ -1377,7 +1378,16 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         // leave evidenceMissing=true to fail-closed below
       }
     }
-    const args = resolvedStageArgs(signal, evidenceFile);
+    let contentFile = evidenceFile;
+    if (!evidenceMissing && signal.knowledge?.trim()) {
+      const stagingDir = join(outputRoot, "staging");
+      await mkdir(stagingDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+      contentFile = join(stagingDir, `${signal.id}.md`);
+      await writeFile(contentFile, `# ${signal.title}\n\n${signal.knowledge.trim()}\n`, {
+        encoding: "utf8", mode: PRIVATE_FILE_MODE,
+      });
+    }
+    const args = resolvedStageArgs(signal, contentFile);
     if (!args) return undefined;
     // `--json` gives a reliable `candidate_id` for the audit record; the
     // human-facing `suggestion` template stays as-is (execution detail only).
@@ -1400,7 +1410,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         error = execError instanceof Error ? execError.message : String(execError);
       }
     }
-    const record = buildDepositRecord(signal, ctx, { exitCode, stdout, stderr, error });
+    const record = buildDepositRecord(signal, ctx, { exitCode, stdout, stderr, error, args: execArgs });
     const path = await writeDeposit(record, ctx);
     if (exitCode === 0) (await seedDepositedSignalIds()).add(signal.id);
     return { path, exitCode };
@@ -1410,14 +1420,15 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   function buildDepositRecord(
     signal: SelfEvolveSignal,
     ctx: ExtensionContext,
-    outcome: { exitCode: number; stdout?: string; stderr?: string; error?: string },
+    outcome: { exitCode: number; stdout?: string; stderr?: string; error?: string; args?: readonly string[] },
   ): DepositRecord {
     const stdout = outcome.stdout ?? "";
     const stderr = outcome.stderr ?? "";
-    const command = formatStageCommandLine([
+    const args = outcome.args ?? [
       ...(buildStageCommandArgs(signal, join(resolvedOutputRoot(), "evidence", `${signal.id}.md`)) ?? []),
       "--json",
-    ]);
+    ];
+    const command = formatStageCommandLine(args);
     return {
       schemaVersion: 1,
       kind: "deposit",
@@ -1431,6 +1442,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       ...(signal.sessionId ? { sessionId: signal.sessionId } : {}),
       ...(signal.runId ? { runId: signal.runId } : {}),
       command,
+      argv: [...args],
       exitCode: outcome.exitCode,
       ...(outcome.exitCode === 0 ? { stagedId: parseStagedId(stdout || stderr) } : {}),
       ...(outcome.error || (outcome.exitCode !== 0 && stderr.trim())
@@ -1928,7 +1940,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         const limitNum = pending
           ? (rest[1] ? Math.max(1, Math.min(10, Number.parseInt(rest[1], 10) || 5)) : 5)
           : (rest[0] ? Math.max(1, Math.min(10, Number.parseInt(rest[0], 10) || 5)) : 5);
-        const allResolved = await loadResolvedSignals(limitNum * 3);
+        const allResolved = await loadResolvedSignals(pending ? undefined : limitNum * 3);
         // Non-actionable signals (no stage template AND not semantically
         // rescued) are excluded from the review set.
         let signals = allResolved.filter(resolvedIsActionable);
@@ -1938,7 +1950,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         if (pending) {
           // Exclude signals already covered by a prior review in this session.
           const reviewedIds = new Set<string>();
-          for (const review of (await loadRecentReviews(config.maxReviewFiles))) {
+          for (const review of (await loadRecentReviews())) {
             if (review.sessionId === currentSessionId && review.signalIds) {
               for (const id of review.signalIds) reviewedIds.add(id);
             }

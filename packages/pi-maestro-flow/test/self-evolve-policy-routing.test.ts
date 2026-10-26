@@ -4,8 +4,8 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import registerSelfEvolve, { setSelfEvolvePolicyEvaluatorForTest, setSelfEvolveReviewRuntimeForTest, setSelfEvolveDepositExecutorForTest } from "../src/self-evolve/extension.ts";
-import { DEFAULT_SELF_EVOLVE_CONFIG, normalizeSelfEvolveConfig, setConfigValue, type SelfEvolveConfig } from "../src/self-evolve/runtime.ts";
-import { applyCapturePolicy, applyReviewPolicy } from "../src/self-evolve/enrichment.ts";
+import { dailySuggestionFileName, DEFAULT_SELF_EVOLVE_CONFIG, normalizeSelfEvolveConfig, setConfigValue, type SelfEvolveConfig } from "../src/self-evolve/runtime.ts";
+import { applyCapturePolicy, applyReviewPolicy, evidenceIdFor } from "../src/self-evolve/enrichment.ts";
 import { createDecisionPolicyService, type PolicyEvaluation } from "../src/decision-policy/service.ts";
 import { DecisionPolicySchema, saveDecisionPolicy } from "../src/decision-policy/config.ts";
 import { configureClassifier, resetClassifierForTest, registerClassifyDomain, bindClassifierRuntime } from "pi-maestro-teammate/v1/classify";
@@ -412,6 +412,129 @@ test("production JEV preserves terminal L0 hits and degrades unavailable adjudic
     await until(async () => (await ledger(h.output, "decision-policy")).length === 2);
     assert.equal(calls, 1);
     assert.equal((await ledger(h.output, "suggestions")).length, 1, "degraded unknown remains filtered by the original gate");
+  } finally { await h.close(); }
+});
+
+for (const variant of ["existing evidence", "rescued unknown", "legacy summary", "blank knowledge"]) test(`semantic knowledge reaches review and staging without overwriting raw evidence (${variant})`, async () => {
+  const heuristic = variant !== "rescued unknown";
+  const h = await harness({ mode: "auto-deposit" });
+  const knowledge = variant === "legacy summary" ? undefined : variant === "blank knowledge" ? "   "
+    : "When publishing asynchronous results, fence the generation because a delayed callback can replace newer state.";
+  const summary = "A short context summary";
+  const payload = knowledge?.trim() || summary;
+  const title = 'Fence "async";publication';
+  let stages = 0;
+  setSelfEvolvePolicyEvaluatorForTest(async (domain) => result({ domain,
+    mode: domain === "evolve-capture" && !heuristic ? "enforce" : "off",
+  }));
+  try {
+    h.evidenceTurn(`${heuristic ? lesson : unknownText} src/payload.ts:1`);
+    await until(async () => (await ledger(h.output, "suggestions")).length === 1);
+    const raw = (await ledger(h.output, "suggestions"))[0];
+    const evidenceFile = join(h.output, "evidence", `${raw.id}.md`);
+    const originalEvidence = heuristic ? await readFile(evidenceFile, "utf8") : undefined;
+    const originalSignals = await ledger(h.output, "suggestions");
+    await mkdir(join(h.output, "enrichments"));
+    await writeFile(join(h.output, "enrichments", dailySuggestionFileName()), JSON.stringify({
+      schemaVersion: 1, kind: "enrichment", signalId: raw.id, traceHash: raw.traceHash,
+      sessionId: raw.sessionId, attempt: 1, status: "semantic", candidateType: "knowhow",
+      title, summary, knowledge,
+      evidenceIds: raw.evidence.map(evidenceIdFor), qualityClass: "failure_lesson",
+      completedAt: new Date().toISOString(),
+    }) + "\n");
+    setSelfEvolveReviewRuntimeForTest({
+      runTeammate: async () => { throw new Error("offline only"); },
+      supervision: { runSupervisedEvaluation: async (_run, options) => {
+        assert.ok(options.task.includes(payload), "review must judge the actual staging payload");
+        return { ok: true, verdict: { verdicts: [{ id: raw.id, action: "stage", candidateType: "knowhow", score: .99, reason: "grounded failure lesson" }] } };
+      } },
+    });
+    let stagedContentFile = "";
+    let stagedArgs: readonly string[] = [];
+    setSelfEvolveDepositExecutorForTest(async (args) => {
+      stages++;
+      stagedArgs = [...args];
+      stagedContentFile = args[args.indexOf("--content-file") + 1];
+      assert.notEqual(stagedContentFile, evidenceFile);
+      const content = await readFile(stagedContentFile, "utf8");
+      assert.ok(content.startsWith(`# ${title}\n`));
+      assert.ok(content.includes(payload));
+      assert.doesNotMatch(content, /tool_trajectory:|<SOP title|<kebab-case-topic>/);
+      return { exitCode: 0, stdout: '{"candidate_id":"KDC-semantic-payload"}', stderr: "" };
+    });
+    await h.command("review 1", h.ctx);
+    assert.equal(stages, 1, JSON.stringify(h.notifications));
+    if (originalEvidence !== undefined) assert.equal(await readFile(evidenceFile, "utf8"), originalEvidence);
+    else assert.match(await readFile(evidenceFile, "utf8"), /evidence:/);
+    assert.deepEqual(await ledger(h.output, "suggestions"), originalSignals);
+    const deposit = (await ledger(h.output, "deposits"))[0];
+    assert.ok(deposit.command.includes(stagedContentFile), "audit must record the actual content file");
+    assert.deepEqual(deposit.argv, stagedArgs, "audit retains argument boundaries and shell metacharacters");
+    assert.equal(deposit.stagedId, "KDC-semantic-payload");
+    await h.command("review 1", h.ctx);
+    assert.equal(stages, 1, "semantic candidates retain deposit idempotency");
+  } finally { await h.close(); }
+});
+
+test("semantic records without any distilled payload cannot stage raw process text", async () => {
+  const h = await harness({ mode: "auto-deposit" });
+  setSelfEvolvePolicyEvaluatorForTest(async () => result({ mode: "off" }));
+  let stages = 0;
+  setSelfEvolveDepositExecutorForTest(async () => {
+    stages++;
+    throw new Error("must not stage incomplete semantic records");
+  });
+  try {
+    h.turn(lesson);
+    await until(async () => (await ledger(h.output, "suggestions")).length === 1);
+    const raw = (await ledger(h.output, "suggestions"))[0];
+    await mkdir(join(h.output, "enrichments"));
+    await writeFile(join(h.output, "enrichments", dailySuggestionFileName()), JSON.stringify({
+      schemaVersion: 1, kind: "enrichment", signalId: raw.id, traceHash: raw.traceHash,
+      sessionId: raw.sessionId, attempt: 1, status: "semantic", candidateType: "knowhow",
+      completedAt: new Date().toISOString(),
+    }) + "\n");
+    await h.command("review 1", h.ctx);
+    assert.match(h.notifications.at(-1)!, /no actionable signals/);
+    assert.equal(stages, 0);
+    assert.equal((await ledger(h.output, "deposits")).length, 0);
+  } finally { await h.close(); }
+});
+
+test("pending review filters before limiting and reads every review in retained daily files", async () => {
+  const h = await harness({ maxReviewFiles: 1 });
+  setSelfEvolvePolicyEvaluatorForTest(async () => result({ mode: "off" }));
+  try {
+    h.turn(lesson);
+    await until(async () => (await ledger(h.output, "suggestions")).length === 1);
+    const raw = (await ledger(h.output, "suggestions"))[0];
+    const signal = (index: number, foreign = false) => ({ ...raw,
+      id: `se-${index.toString(16).padStart(12, "0")}`,
+      traceHash: index.toString(16).padStart(12, "0") + "a".repeat(52),
+      ...(foreign ? { project: "another-project", sessionId: "another-session" } : {}),
+    });
+    const pending = signal(1);
+    const reviewed = [signal(2), signal(3), signal(4)];
+    const foreign = Array.from({ length: 20 }, (_, i) => signal(i + 5, true));
+    const suggestions = (await readdir(join(h.output, "suggestions")))[0];
+    await writeFile(join(h.output, "suggestions", suggestions), [pending, ...reviewed, ...foreign].map((s) => JSON.stringify(s)).join("\n") + "\n");
+    await mkdir(join(h.output, "reviews"));
+    await writeFile(join(h.output, "reviews", dailySuggestionFileName()), reviewed.map((s) => JSON.stringify({
+      schemaVersion: 1, kind: "review", project: raw.project, sessionId: raw.sessionId,
+      signalIds: [s.id], verdicts: [{ id: s.id, action: "skip" }],
+    })).join("\n") + "\n");
+    setSelfEvolveReviewRuntimeForTest({
+      runTeammate: async () => { throw new Error("offline only"); },
+      supervision: { runSupervisedEvaluation: async (_run, options) => {
+        assert.deepEqual([...options.task.matchAll(/- id: (se-\w+)/g)].map((m) => m[1]), [pending.id]);
+        return { ok: true, verdict: { verdicts: [{ id: pending.id, action: "skip", candidateType: "knowhow", score: .1, reason: "process noise" }] } };
+      } },
+    });
+    await h.command("review pending 1", h.ctx);
+    const reviews = await ledger(h.output, "reviews");
+    assert.equal(reviews.length, 4, JSON.stringify(h.notifications));
+    assert.deepEqual(reviews.at(-1).signalIds, [pending.id]);
+    assert.equal((await ledger(h.output, "deposits")).length, 0);
   } finally { await h.close(); }
 });
 

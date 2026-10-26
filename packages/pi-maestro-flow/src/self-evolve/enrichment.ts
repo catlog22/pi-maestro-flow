@@ -118,6 +118,8 @@ export function evidenceIdFor(ref: EvidenceRef): string {
  * mode, or the ledger is empty), the resolved signal equals the raw signal.
  */
 export interface ResolvedSignal extends SelfEvolveSignal {
+  /** Reusable staging payload, separate from the raw evidence snapshot. */
+  knowledge?: string;
   /** Enrichment status that produced this projection. */
   enrichmentStatus: EnrichmentStatus;
   /** Quality class when `enrichmentStatus === "semantic"`. */
@@ -161,6 +163,7 @@ export function resolveSignal(
       ...(enrichment.error ? {} : {}),
     };
   }
+  const knowledge = enrichment.knowledge?.trim() || enrichment.summary?.trim();
   return {
     ...raw,
     enrichmentStatus: "semantic",
@@ -170,6 +173,7 @@ export function resolveSignal(
     candidateType: enrichment.candidateType ?? raw.candidateType,
     title: enrichment.title ?? raw.title,
     summary: enrichment.summary ?? raw.summary,
+    ...(knowledge ? { knowledge } : {}),
   };
 }
 

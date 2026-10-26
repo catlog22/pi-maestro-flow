@@ -107,8 +107,23 @@ describe("resolveSignal", () => {
     assert.equal(resolved.candidateType, "knowhow");
     assert.equal(resolved.title, "enriched title");
     assert.equal(resolved.summary, "enriched summary with context + finding + constraint");
+    assert.equal(resolved.knowledge, "doing X you must watch Y because Z");
+    assert.equal(raw.summary, "raw summary");
     assert.equal(resolved.enrichmentQuality, "pitfall");
     assert.equal(resolved.enrichmentConfidence, 0.8);
+  });
+
+  it("uses the distilled summary for legacy semantic records without knowledge", () => {
+    for (const knowledge of [undefined, "", "   "]) {
+      const resolved = resolveSignal(makeRawSignal(), makeSemanticRecord({ knowledge }));
+      assert.equal(resolved.knowledge, "enriched summary with context + finding + constraint");
+    }
+  });
+
+  it("does not substitute raw process text for a missing semantic payload", () => {
+    const resolved = resolveSignal(makeRawSignal(), makeSemanticRecord({ knowledge: undefined, summary: undefined }));
+    assert.equal(resolved.knowledge, undefined);
+    assert.equal(resolved.summary, "raw summary");
   });
 
   it("preserves raw signal fields on heuristic_fallback", () => {

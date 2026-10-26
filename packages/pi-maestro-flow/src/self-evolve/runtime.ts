@@ -1143,7 +1143,7 @@ export const REVIEW_OUTPUT_SCHEMA: Record<string, unknown> = {
 
 /** Build the reviewer prompt from recent signals. */
 export function buildReviewPrompt(
-  signals: readonly SelfEvolveSignal[],
+  signals: readonly (SelfEvolveSignal & { knowledge?: string })[],
   scoreThreshold = REVIEW_SCORE_THRESHOLD_DEFAULT,
 ): string {
   const header = [
@@ -1171,6 +1171,7 @@ export function buildReviewPrompt(
       `  source: ${signal.source} · type: ${signal.candidateType} · project: ${signal.project ?? "?"}`,
       `  title: ${signal.title}`,
       `  summary: ${signal.summary}`,
+      ...(signal.knowledge?.trim() ? [`  knowledge: ${signal.knowledge}`] : []),
       `  evidence: ${evidence || "(none)"}`,
     ].join("\n");
   });
@@ -1300,6 +1301,8 @@ export interface DepositRecord {
   sessionId?: string;
   runId?: string;
   command: string;
+  /** Exact stage arguments; command remains a human-readable legacy field. */
+  argv?: string[];
   exitCode: number;
   /** Parsed candidate id from the stage output (`KDC-…`); present on success. */
   stagedId?: string;

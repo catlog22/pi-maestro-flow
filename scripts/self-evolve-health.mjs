@@ -32,6 +32,7 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const OUTPUT_DIR = process.env.SELF_EVOLVE_OUTPUT_DIR?.trim()
   ? resolve(process.env.SELF_EVOLVE_OUTPUT_DIR)
@@ -346,31 +347,61 @@ function buildExpiredCandidateItems(crossRunCandidates, signals) {
   return items;
 }
 
-/** 负反馈统计（A6）: reviews/*.jsonl 聚合 + suggestions/*.jsonl unknown 占比。 */
-function aggregateReviews() {
-  const records = readJsonDirLines(join(OUTPUT_DIR, "reviews"));
-  const totals = { records: records.length, stage: 0, skip: 0, uncertain: 0, withVerdict: 0 };
+/** Match the producer's projectNameFor(cwd) contract, never infer legacy ownership. */
+function scopeRecords(records, project) {
+  const selected = records.filter((r) => r && typeof r === "object" && r.project === project);
+  return {
+    records: selected,
+    coverage: {
+      total: records.length,
+      included: selected.length,
+      unscoped: records.filter((r) => !r || typeof r.project !== "string" || !r.project.trim()).length,
+      otherProjects: records.filter((r) => typeof r?.project === "string" && r.project.trim() && r.project !== project).length,
+    },
+  };
+}
+
+/** Reviews count batches; verdict/action/score buckets count individual decisions. */
+function aggregateReviews(project = basename(process.cwd()), outputDir = OUTPUT_DIR) {
+  const scopedReviews = scopeRecords(readJsonDirLines(join(outputDir, "reviews")), project);
+  const totals = { records: scopedReviews.records.length, stage: 0, skip: 0, uncertain: 0, withVerdict: 0 };
   const scoreBuckets = { lt04: 0, lt06: 0, lt08: 0, gte08: 0 };
-  for (const r of records) {
-    const verdict = String(r.verdict ?? r.decision ?? r.stage_verdict ?? "").trim().toLowerCase();
-    if (verdict) totals.withVerdict += 1;
-    if (verdict === "stage" || r.stage === true) totals.stage += 1;
-    else if (verdict === "skip" || r.skip === true) totals.skip += 1;
-    else if (verdict === "uncertain" || r.uncertain === true) totals.uncertain += 1;
-    const score = Number(r.score);
-    if (Number.isFinite(score)) {
-      if (score < 0.4) scoreBuckets.lt04 += 1;
-      else if (score < 0.6) scoreBuckets.lt06 += 1;
-      else if (score < 0.8) scoreBuckets.lt08 += 1;
-      else scoreBuckets.gte08 += 1;
+  for (const record of scopedReviews.records) {
+    // An empty canonical batch is not a flat verdict; do not double count it.
+    const verdicts = Array.isArray(record.verdicts) ? record.verdicts : [record];
+    for (const r of verdicts) {
+      if (!r || typeof r !== "object") continue;
+      const verdict = String(r.action ?? r.verdict ?? r.decision ?? r.stage_verdict ?? "").trim().toLowerCase();
+      if (verdict) totals.withVerdict += 1;
+      if (verdict === "stage" || r.stage === true) totals.stage += 1;
+      else if (verdict === "skip" || r.skip === true) totals.skip += 1;
+      else if (verdict === "uncertain" || r.uncertain === true) totals.uncertain += 1;
+      // null/empty/boolean are not scores (Number(null) would fabricate a zero).
+      const score = typeof r.score === "number" || (typeof r.score === "string" && r.score.trim())
+        ? Number(r.score) : NaN;
+      if (Number.isFinite(score) && score >= 0 && score <= 1) {
+        if (score < 0.4) scoreBuckets.lt04 += 1;
+        else if (score < 0.6) scoreBuckets.lt06 += 1;
+        else if (score < 0.8) scoreBuckets.lt08 += 1;
+        else scoreBuckets.gte08 += 1;
+      }
     }
   }
-  const suggestions = readJsonDirLines(join(OUTPUT_DIR, "suggestions"));
-  const suggestionUnknown = suggestions.filter((s) => String(s.candidateType ?? "") === "unknown").length;
+  const scopedSuggestions = scopeRecords(readJsonDirLines(join(outputDir, "suggestions")), project);
+  const suggestions = scopedSuggestions.records;
+  const suggestionUnknown = suggestions.filter((s) => s.candidateType === "unknown").length;
+  const suggestionTyped = suggestions.filter((s) => ["unknown", "spec", "knowhow"].includes(s.candidateType)).length;
   totals.suggestionRecords = suggestions.length;
   totals.suggestionUnknown = suggestionUnknown;
-  const unknownRatio = suggestions.length > 0 ? suggestionUnknown / suggestions.length : null;
-  return { totals, scoreBuckets, unknownRatio };
+  totals.suggestionTyped = suggestionTyped;
+  const unknownRatio = suggestionTyped > 0 ? suggestionUnknown / suggestionTyped : null;
+  const coverage = { reviews: scopedReviews.coverage, suggestions: scopedSuggestions.coverage };
+  const warnings = [];
+  if (!totals.withVerdict) warnings.push("当前项目无可用评审判定（数据不足，不代表健康）");
+  if (!suggestionTyped) warnings.push("当前项目无可用 suggestion 类型，unknown 占比不可判定");
+  if (suggestionTyped < suggestions.length) warnings.push("缺失/无效 candidateType 未计入 unknown 占比分母");
+  if (coverage.reviews.unscoped || coverage.suggestions.unscoped) warnings.push("无 project 的旧记录已排除，不能归属当前项目");
+  return { totals, scoreBuckets, unknownRatio, coverage, advisory: warnings.join("；") || null };
 }
 
 /**
@@ -378,8 +409,9 @@ function aggregateReviews() {
  * ledgers 中被 promote 的候选（真实 schema 标记字段 status/promoted_id/promotion_receipt）。
  * 字段取不到时仅报告 receipt 统计并注明 advisory。
  */
-function aggregateApprovals(projectRoot) {
-  const receipts = readJsonDirLines(join(OUTPUT_DIR, "approvals"));
+function aggregateApprovals(projectRoot, outputDir = OUTPUT_DIR) {
+  const scoped = scopeRecords(readJsonDirLines(join(outputDir, "approvals")), basename(projectRoot));
+  const receipts = scoped.records;
   const promote = receipts.filter((r) => r.action === "promote");
   const emptyCandidatesReceipts = promote.filter((r) => !Array.isArray(r.candidates) || r.candidates.length === 0);
   let promotedInLedgers = 0;
@@ -405,11 +437,15 @@ function aggregateApprovals(projectRoot) {
     }
   };
   walk(join(projectRoot, ".workflow", "sessions"));
-  let advisory = null;
+  const warnings = [];
   if (!promotedFieldObserved && promotedInLedgers === 0) {
-    advisory = "ledger schema 未发现 promoted 标记字段（status/promoted_id/promotion_receipt）— 仅报告 receipt 统计";
+    warnings.push("ledger schema 未发现 promoted 标记字段（status/promoted_id/promotion_receipt）— 仅报告 receipt 统计");
   }
+  if (!promote.length) warnings.push("当前项目无可归属的 promote receipt，无法判断批准覆盖率");
+  if (scoped.coverage.unscoped) warnings.push("无 project 的旧 approval receipt 已排除，不能据此判定当前项目缺少批准");
+  const advisory = warnings.join("；") || null;
   return {
+    coverage: scoped.coverage,
     promoteReceipts: promote.length,
     emptyCandidatesReceipts: emptyCandidatesReceipts.length,
     promotedInLedgers,
@@ -556,6 +592,7 @@ function buildHealth() {
       emptyCandidatesReceipts: approval.emptyCandidatesReceipts,
       promotedInLedgers: approval.promotedInLedgers,
       advisory: approval.advisory,
+      coverage: approval.coverage,
     },
     crossRunCandidates: crossRunCandidates.map((c) => ({
       title: c.title,
@@ -592,7 +629,7 @@ function formatSummary(health) {
     `  cross-run duplicate candidates: ${health.crossRunCandidates.length}`,
     `  signals: validated ${health.signals.validated} · contradicted ${health.signals.contradicted} · cited ${health.signals.cited} (${health.signals.total} entries, 全量)`,
     `  review-required: ${health.reviewRequired?.total ?? 0}（滞留>7d 入队 ${rrStale}）`,
-    `  reviews: ${reviews.totals.records} 记录（stage ${reviews.totals.stage}/skip ${reviews.totals.skip}/uncertain ${reviews.totals.uncertain}）· unknown ${reviews.unknownRatio === null ? "n/a" : `${(reviews.unknownRatio * 100).toFixed(1)}%`}`,
+    `  reviews: ${reviews.totals.records} 记录（stage ${reviews.totals.stage}/skip ${reviews.totals.skip}/uncertain ${reviews.totals.uncertain}）· unknown ${reviews.unknownRatio === null ? "n/a" : `${(reviews.unknownRatio * 100).toFixed(1)}%`}${reviews.advisory ? ` · ⚠ ${reviews.advisory}` : ""}`,
     `  approval: promote receipts ${approval.promoteReceipts} · 空 candidates ${approval.emptyCandidatesReceipts}${approval.advisory ? ` · ⚠ ${approval.advisory}` : ""}`,
     `  revalidation queue: ${health.revalidationCount} (contest ${health.revalidation.filter((r) => r.subtype.startsWith("contest")).length} · audit ${health.revalidation.filter((r) => r.id.startsWith("KAU") || r.id.startsWith("HEALTH")).length} · self-evolve ${health.revalidation.filter((r) => r.id.startsWith("SE-")).length})`,
   ];
@@ -629,4 +666,6 @@ function main() {
   console.log(formatSummary(health));
 }
 
-main();
+// Importable pure/read-only seams let focused tests avoid global snapshot writes.
+export { aggregateReviews, aggregateApprovals, aggregateSignals, formatSummary };
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();
