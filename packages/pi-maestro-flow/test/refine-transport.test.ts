@@ -19,19 +19,35 @@ interface Harness {
   readonly events: RefineTransportEvent[];
   readonly request: () => RefineTransportRequest | undefined;
   actions(action: RefineTransportAction): Promise<void>;
-  settle(result: { action: "apply" | "discard" | "cancel"; turnId?: string }): void;
-  disposed: () => number;
+  /** Drive the local overlay to a terminal decision, as a TUI user would. */
+  closeOverlay(result: { action: "apply" | "discard" | "cancel" }): void;
+  cancelCount: () => number;
   dispose(): void;
+}
+
+/** Minimal TUI stub that hands the overlay factory back so tests can drive it. */
+function overlayUi() {
+  let done: ((result: unknown) => void) | undefined;
+  const ui = {
+    custom<T>(factory: (tui: { requestRender(): void }, theme: unknown, kb: unknown, finish: (r: T) => void) => unknown) {
+      return new Promise<T | undefined>((resolve) => {
+        done = resolve as (result: unknown) => void;
+        factory({ requestRender() {} }, {}, {}, (result: T) => resolve(result));
+      });
+    },
+    notify() {},
+  };
+  return { ui, close: (result: unknown) => done?.(result) };
 }
 
 function harness(options?: { accept?: boolean }): Harness {
   const events: RefineTransportEvent[] = [];
   let request: RefineTransportRequest | undefined;
-  let resolveHandle!: (value: { action: "apply" | "discard" | "cancel"; turnId?: string }) => void;
-  const done = new Promise<{ action: "apply" | "discard" | "cancel"; turnId?: string }>((resolve) => {
+  let resolveHandle!: (value: { action: "apply" | "discard" | "cancel" }) => void;
+  const done = new Promise<{ action: "apply" | "discard" | "cancel" }>((resolve) => {
     resolveHandle = resolve;
   });
-  let cancelled = 0;
+  let cancelCount = 0;
   const dispose = registerRefineTransport({
     open(incoming) {
       if (options?.accept === false) return undefined;
@@ -40,7 +56,7 @@ function harness(options?: { accept?: boolean }): Harness {
         promise: done,
         emit(event) { events.push(event); },
         finish(result) { resolveHandle(result); },
-        cancel() { cancelled += 1; },
+        cancel() { cancelCount += 1; },
       };
     },
   });
@@ -48,69 +64,66 @@ function harness(options?: { accept?: boolean }): Harness {
     events,
     request: () => request,
     async actions(action) {
-      assert.ok(request, "transport was never opened");
+      assert.ok(request, `transport was never opened (events=${events.length})`);
       await request.handleAction(action);
     },
-    settle: (result) => resolveHandle(result),
-    disposed: () => cancelled,
+    closeOverlay: (result) => resolveHandle(result),
+    cancelCount: () => cancelCount,
     dispose,
   };
 }
 
 function stubPi(): ExtensionAPI {
-  return {
-    on() { return () => {}; },
-    ui: { notify() {} },
-  } as unknown as ExtensionAPI;
+  return { on() { return () => {}; }, ui: { notify() {} } } as unknown as ExtensionAPI;
 }
 
-const refineContext = {
-  cwd: "/repo",
-  hasUI: false,
-  ui: { notify() {} },
-  mode: "plan",
-  model: { provider: "p", id: "m" },
-  modelRegistry: {},
-  isProjectTrusted: true,
-  sessionManager: { getSessionId: () => "session-1" },
-} as unknown as Parameters<typeof openRefinePanel>[1];
+function refineContextWith(ui: unknown) {
+  return {
+    cwd: "/repo",
+    hasUI: true,
+    ui,
+    mode: "tui",
+    model: { provider: "p", id: "m" },
+    modelRegistry: {},
+    isProjectTrusted: true,
+    sessionManager: { getSessionId: () => "session-1" },
+  } as unknown as Parameters<typeof openRefinePanel>[1];
+}
 
 test("remote refine opens with an authoritative snapshot before any user action", async () => {
   const h = harness();
+  const overlay = overlayUi();
   try {
-    const pending = openRefinePanel(stubPi(), refineContext, { markdown: PLAN, revision: 4 });
-    await new Promise((resolve) => setImmediate(resolve));
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 4 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
     const types = h.events.map((event) => event.type);
-    // status(ready) precedes the snapshot so a client that only understands
-    // status still sees a well-formed handshake.
-    assert.deepEqual(types, ["status", "status", "snapshot"]);
+    // opening handshake, then the overlay's first authoritative snapshot.
+    assert.deepEqual(types, ["status", "status", "snapshot", "snapshot"]);
+    const sequences = h.events.map((event) => event.sequence);
+    assert.deepEqual(sequences, [1, 2, 3, 4], "sequences must be monotonically increasing");
     const snapshot = h.events[2];
     assert.equal(snapshot?.type, "snapshot");
     if (snapshot?.type !== "snapshot") throw new Error("expected snapshot");
     assert.equal(snapshot.snapshot.revision, 4);
-    assert.equal(snapshot.snapshot.highWaterSequence, 2);
-    assert.equal(snapshot.snapshot.status, "ready");
-    // Exact target and identity must be present for the transport relay.
     assert.equal(snapshot.snapshot.target.sessionId, "session-1");
     assert.equal(snapshot.snapshot.target.normalizedCwd, "/repo");
     assert.ok(snapshot.snapshot.refineSessionId.startsWith("refine:/repo:"));
-    h.settle({ action: "cancel" });
+    overlay.close({ action: "cancel", session: createRefineSession("reviewer", "p/m") });
     await pending;
   } finally {
     h.dispose();
   }
 });
 
-test("discard resolves the panel with a discard action and emits discarded terminal", async () => {
+test("a remote discard intent drives the local overlay to its own discard outcome", async () => {
   const h = harness();
+  const overlay = overlayUi();
   try {
-    const pending = openRefinePanel(stubPi(), refineContext, { markdown: PLAN, revision: 5 });
-    await new Promise((resolve) => setImmediate(resolve));
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
     await h.actions({ type: "discard", actionId: "a-discard" });
-    const terminal = h.events.find((event) => event.type === "terminal");
-    assert.equal(terminal?.type, "terminal");
-    if (terminal?.type !== "terminal") throw new Error("expected terminal");
-    assert.equal(terminal.status, "discarded");
+    // The overlay authority closes with discard; the transport only mirrors it.
+    await new Promise((resolve) => setTimeout(resolve, 60));
     const outcome = await pending;
     assert.equal(outcome.action, "discard");
   } finally {
@@ -118,84 +131,103 @@ test("discard resolves the panel with a discard action and emits discarded termi
   }
 });
 
-test("duplicate action ids are not executed twice and do not emit a second result", async () => {
+test("duplicate action ids are relayed once", async () => {
   const h = harness();
+  const overlay = overlayUi();
   try {
-    const pending = openRefinePanel(stubPi(), refineContext, { markdown: PLAN, revision: 1 });
-    await new Promise((resolve) => setImmediate(resolve));
-    const action: RefineTransportAction = {
-      type: "snapshot_request",
-      actionId: "a-1",
-    };
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const action: RefineTransportAction = { type: "snapshot_request", actionId: "a-1" };
     await h.actions(action);
     await h.actions(action);
-    const snapshots = h.events.filter((event) => event.type === "snapshot");
-    assert.equal(snapshots.length, 2, "one open snapshot plus one explicit request");
     const results = h.events.filter((event) => event.type === "action_result");
-    assert.equal(results.length, 0, "snapshot_request carries no action result");
-    h.settle({ action: "cancel" });
+    assert.equal(results.length, 1, "the duplicate action id is not relayed twice");
+    overlay.close({ action: "cancel", session: createRefineSession("reviewer", "p/m") });
     await pending;
   } finally {
     h.dispose();
   }
 });
 
-test("apply is a presentation request only: the business terminal waits for finalize", async () => {
+test("apply stays a presentation request: no terminal until the caller finalizes", async () => {
   const h = harness();
+  const overlay = overlayUi();
   try {
-    const pending = openRefinePanel(stubPi(), refineContext, { markdown: PLAN, revision: 7 });
-    await new Promise((resolve) => setImmediate(resolve));
-    // No turn has been produced, so apply must be rejected as invalid state.
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 7 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
     await h.actions({ type: "apply", actionId: "a-apply", turnId: "turn-1" });
-    const rejected = h.events.find((event) => event.type === "action_result");
-    assert.equal(rejected?.type, "action_result");
-    if (rejected?.type !== "action_result") throw new Error("expected action_result");
-    assert.equal(rejected.status, "rejected");
-    assert.equal(rejected.errorCode, "invalid_state");
+    // No turn exists yet, so the overlay keeps running and emits no terminal.
     assert.equal(h.events.some((event) => event.type === "terminal"), false);
-
-    h.settle({ action: "cancel" });
-    const outcome = await pending;
-    // Local/TUI results never expose finalize; only remote apply would.
-    assert.equal(outcome.action, "cancel");
+    overlay.close({ action: "cancel", session: createRefineSession("reviewer", "p/m") });
+    await pending;
   } finally {
     h.dispose();
   }
 });
 
-test("a session that is already terminal rejects further actions with session_terminal", async () => {
-  const h = harness();
+test("a failing transport never removes the local refine path", async () => {
+  const events: RefineTransportEvent[] = [];
+  const overlay = overlayUi();
+  const dispose = registerRefineTransport({
+    open() {
+      return {
+        promise: Promise.reject(new Error("transport exploded")),
+        emit(event) { events.push(event); },
+        finish() {},
+        cancel() {},
+      };
+    },
+  });
   try {
-    const pending = openRefinePanel(stubPi(), refineContext, { markdown: PLAN, revision: 2 });
-    await new Promise((resolve) => setImmediate(resolve));
-    await h.actions({ type: "cancel", actionId: "a-cancel" });
-    assert.equal(h.events.some((event) => event.type === "terminal"), true);
-    await h.actions({ type: "snapshot_request", actionId: "a-late" });
-    const late = h.events.filter((event) => event.type === "action_result").at(-1);
-    assert.equal(late?.type, "action_result");
-    if (late?.type !== "action_result") throw new Error("expected action_result");
-    assert.equal(late.errorCode, "session_terminal");
-    h.settle({ action: "cancel" });
-    await pending;
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 9 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // The overlay still exists and owns the outcome.
+    overlay.close({ action: "cancel", session: createRefineSession("reviewer", "p/m") });
+    const outcome = await pending;
+    assert.equal(outcome.action, "cancel");
+    assert.ok(events.length > 0, "the mirror still received the opening handshake");
   } finally {
-    h.dispose();
+    dispose();
   }
 });
 
 test("without a registered transport the local TUI path is used unchanged", async () => {
   const h = harness({ accept: false });
+  const overlay = overlayUi();
   try {
     const session: RefineSession = createRefineSession("reviewer", "p/m");
-    // The stub context has hasUI false, so the overlay resolves as cancel; this
-    // still proves no remote transport intercepted the panel.
-    const outcome = await openRefinePanel(stubPi(), refineContext, {
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), {
       markdown: PLAN,
       session,
       revision: 3,
     });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    overlay.close({ action: "cancel", session });
+    const outcome = await pending;
     assert.equal(outcome.action, "cancel");
     assert.equal(outcome.finalize, undefined);
     assert.equal(h.events.length, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test("an aborted parent signal does not fabricate a remote cancellation", async () => {
+  const h = harness();
+  const overlay = overlayUi();
+  const controller = new AbortController();
+  try {
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), {
+      markdown: PLAN,
+      revision: 11,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    controller.abort();
+    const outcome = await pending;
+    // The overlay resolves as cancel; the transport never emits its own terminal.
+    assert.equal(outcome.action, "cancel");
+    assert.equal(h.events.some((event) => event.type === "terminal"), false);
   } finally {
     h.dispose();
   }

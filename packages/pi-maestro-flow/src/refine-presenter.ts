@@ -1,21 +1,15 @@
 /**
- * Flow-side controller that presents a refine session on a remote transport.
+ * Flow-side adapter that mirrors a local refine overlay onto a remote transport.
  *
- * Flow remains the business authority: it runs the role subagent, records the
- * turn, and only reports a business terminal once the caller has committed the
- * Apply. This module deliberately holds no ordering or recovery state machine —
- * that belongs to the Host and Mobile SDK owners of the wire protocol.
+ * The local TUI overlay is the single authority for the refine session: it owns
+ * the turn list, the running subagent, and the terminal decision. This module
+ * only projects that authoritative state onto the wire and replays remote user
+ * intents back into the overlay. It never runs a subagent and never invents a
+ * terminal, so a detached or failing transport can never change the local flow.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type {
-  PlanRefineContext,
-  RefinePanelResult,
-  RefineRole,
-  RefineSession,
-  RefineTurn,
-} from "./tools/plan-refine.ts";
-import { REFINE_ROLES, runRefineSubagent } from "./tools/plan-refine.ts";
+import type { RefineSession, RefineTurn } from "./tools/plan-refine.ts";
+import { REFINE_ROLES } from "./tools/plan-refine.ts";
 import type {
   RefineTransportAction,
   RefineTransportEventBody,
@@ -25,38 +19,39 @@ import type {
   RefineTransportTarget,
   RefineTransportTurn,
 } from "./refine-transport.ts";
-
-export type { RefinePanelResult };
-
-export type RefineRunContext = PlanRefineContext;
-
-export interface RemoteRefinePanel {
-  readonly promise: Promise<RefinePanelResult>;
-  dispose(): void;
-}
+import type {
+  RefineOverlayIntent,
+  RefineOverlayMirror,
+  RefineOverlayMirrorState,
+} from "./tui/plan-refine-overlay.ts";
 
 export interface RemoteRefineOptions {
   readonly sessionId: string;
   readonly markdown: string;
   readonly revision: number;
   readonly session: RefineSession;
-  readonly signal: AbortSignal;
   readonly cwd: string;
   readonly mode: string;
-  readonly onOutput?: (turn: RefineTurn) => Promise<void>;
 }
 
-interface RefinePresenterState {
+/** Transport-side identity plus the overlay mirror bridge. */
+export interface RefinePresenterState {
   readonly refineSessionId: string;
   readonly operationId: number;
   readonly target: RefineTransportTarget;
-  readonly latestTurn: () => RefineTransportTurn | undefined;
+  /** Attach the transport handle and emit the opening handshake. */
   start(handle: RefineTransportHandle): void;
-  handleAction(pi: ExtensionAPI, ctx: RefineRunContext, action: RefineTransportAction): Promise<void>;
+  /** Mirror object handed to the local overlay. */
+  readonly mirror: RefineOverlayMirror;
+  /** Relay one remote action back into the local overlay authority. */
+  handleAction(action: RefineTransportAction): void;
+  /** Emit the business terminal after the caller committed the Apply. */
   finalize(result: RefineTransportResult): void;
+  /** Last turn observed by the mirror, for result projection. */
+  latestTurn(): RefineTransportTurn | undefined;
 }
 
-/** Convert an internal Refine turn into a transport-serializable turn with a stable turn ID. */
+/** Convert an internal Refine turn into a transport-serializable turn. */
 function toTransportTurn(turn: RefineTurn, index: number): RefineTransportTurn {
   return {
     ...turn,
@@ -66,49 +61,109 @@ function toTransportTurn(turn: RefineTurn, index: number): RefineTransportTurn {
 }
 
 /**
- * Bind one refine session to a presenter. `pi` is supplied per action so the
- * controller stays independent of the extension context lifetime.
+ * Create the wire adapter for one refine session. Call `start(handle)` once the
+ * transport accepted the request, then hand `mirror` to the local overlay.
  */
 export function createRefinePresenterState(options: RemoteRefineOptions): RefinePresenterState {
   const refineSessionId = `refine:${options.cwd}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
   const operationId = Date.now();
   const target: RefineTransportTarget = { sessionId: options.sessionId, normalizedCwd: options.cwd };
-  const session = options.session;
-  const signal = options.signal;
 
   let sequence = 0;
   let handle: RefineTransportHandle | undefined;
   let terminal = false;
-  let applying = false;
-  let running: AbortController | undefined;
+  let latestState: RefineOverlayMirrorState | undefined;
   let latestTurn: RefineTransportTurn | undefined;
-  let pendingApplyActionId: string | undefined;
   const seenActions = new Set<string>();
-
-  const snapshot = (): RefineTransportSnapshot => ({
-    refineSessionId,
-    operationId,
-    target,
-    revision: options.revision,
-    status: running ? "running" : "ready",
-    highWaterSequence: sequence,
-    session: { ...session, turns: [...session.turns] },
-    turns: session.turns.map(toTransportTurn),
-  });
+  let intentHandler: ((intent: RefineOverlayIntent) => void) | undefined;
 
   const send = (body: RefineTransportEventBody): void => {
     if (terminal && body.type !== "terminal" && body.type !== "action_result") return;
     sequence += 1;
-    handle?.emit({ ...body, sequence });
+    try {
+      handle?.emit({ ...body, sequence });
+    } catch {
+      // A detached transport must never break the local authority.
+    }
   };
 
-  /** Mark the session terminal locally; callers still emit their own event. */
-  const settle = (): void => {
-    if (terminal) return;
-    terminal = true;
-    running?.abort();
-    running = undefined;
+  const snapshot = (): RefineTransportSnapshot => {
+    const session = latestState?.session ?? options.session;
+    return {
+      refineSessionId,
+      operationId,
+      target,
+      revision: options.revision,
+      status: latestState?.phase === "running" ? "running" : "ready",
+      highWaterSequence: sequence,
+      session: { ...session, turns: [...session.turns] },
+      turns: session.turns.map(toTransportTurn),
+    };
   };
+
+  /** Map one authoritative overlay state onto wire events. */
+  function publish(state: RefineOverlayMirrorState): void {
+    const previous = latestState;
+    latestState = state;
+    const turns = state.session.turns.map(toTransportTurn);
+    latestTurn = turns.at(-1) ?? latestTurn;
+
+    if (!previous) {
+      send({ type: "snapshot", snapshot: snapshot() });
+      return;
+    }
+    if (previous.phase !== state.phase) {
+      send({ type: "status", status: state.phase === "running" ? "running" : "ready" });
+    }
+    const appended = turns.slice(previous.session.turns.length);
+    for (const turn of appended) send({ type: "turn", turn });
+    if (appended.length === 0 && previous.status !== state.status) {
+      // Status text changes are not part of the wire contract; the status frame
+      // above already conveys the machine-readable phase transition.
+    }
+  }
+
+  /** Replay one remote action against the local overlay authority. */
+  function replay(action: RefineTransportAction): void {
+    if (seenActions.has(action.actionId)) return;
+    seenActions.add(action.actionId);
+    if (!intentHandler) {
+      send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
+      return;
+    }
+    if (terminal) {
+      send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "session_terminal" });
+      return;
+    }
+    switch (action.type) {
+      case "snapshot_request":
+        send({ type: "action_result", actionId: action.actionId, status: "accepted" });
+        send({ type: "snapshot", snapshot: snapshot() });
+        return;
+      case "run":
+        send({ type: "action_result", actionId: action.actionId, status: "accepted" });
+        intentHandler({
+          type: "run",
+          role: action.role,
+          model: action.model,
+          label: action.modelLabel,
+          userInput: action.userInput,
+        });
+        return;
+      case "apply":
+        send({ type: "action_result", actionId: action.actionId, status: "accepted", turnId: action.turnId });
+        intentHandler({ type: "apply", turnId: action.turnId });
+        return;
+      case "discard":
+        send({ type: "action_result", actionId: action.actionId, status: "accepted" });
+        intentHandler({ type: "discard" });
+        return;
+      case "cancel":
+        send({ type: "action_result", actionId: action.actionId, status: "accepted" });
+        intentHandler({ type: "cancel" });
+        return;
+    }
+  }
 
   return {
     refineSessionId,
@@ -118,136 +173,44 @@ export function createRefinePresenterState(options: RemoteRefineOptions): Refine
 
     start(opened: RefineTransportHandle) {
       handle = opened;
+      // The local overlay is the authority, so the transport's own promise is
+      // only an advisory signal. Consume it so a failing or detached mirror can
+      // never surface as an unhandled rejection.
+      void opened.promise.catch((error) => {
+        console.error(`[maestro] Refine mirror detached: ${error instanceof Error ? error.message : String(error)}`);
+      });
       send({ type: "status", status: "opening" });
       send({ type: "status", status: "ready" });
       // Emitted last so a reconnecting client recovers state from one frame.
       send({ type: "snapshot", snapshot: snapshot() });
     },
 
-    async handleAction(pi: ExtensionAPI, ctx: RefineRunContext, action: RefineTransportAction) {
-      if (seenActions.has(action.actionId)) return;
-      seenActions.add(action.actionId);
+    mirror: {
+      publish,
+      onIntent(handler) {
+        intentHandler = handler;
+        return () => {
+          if (intentHandler === handler) intentHandler = undefined;
+        };
+      },
+    },
 
-      if (terminal || applying) {
-        send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "session_terminal" });
-        return;
-      }
-      if (action.type === "snapshot_request") {
-        send({ type: "snapshot", snapshot: snapshot() });
-        return;
-      }
-      if (action.type === "cancel") {
-        send({ type: "action_result", actionId: action.actionId, status: "accepted" });
-        settle();
-        send({ type: "terminal", status: "cancelled" });
-        handle?.finish({ action: "cancel" });
-        return;
-      }
-      if (action.type === "discard") {
-        if (running) {
-          send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
-          return;
-        }
-        send({ type: "action_result", actionId: action.actionId, status: "accepted" });
-        settle();
-        send({ type: "terminal", status: "discarded" });
-        handle?.finish({ action: "discard" });
-        return;
-      }
-      if (action.type === "apply") {
-        if (running || !latestTurn || latestTurn.turnId !== action.turnId) {
-          send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
-          return;
-        }
-        // Ask for the Apply; the business terminal waits for finalize().
-        send({ type: "action_result", actionId: action.actionId, status: "accepted", turnId: action.turnId });
-        applying = true;
-        pendingApplyActionId = action.actionId;
-        handle?.finish({ action: "apply", turnId: action.turnId });
-        return;
-      }
-      if (running) {
-        send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
-        return;
-      }
-      const spec = REFINE_ROLES[action.role as RefineRole];
-      if (!spec || typeof action.model !== "string" || !action.model.trim() || typeof action.userInput !== "string") {
-        send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
-        return;
-      }
-
-      let prompt: string;
-      try {
-        prompt = spec.buildPrompt(options.markdown, session.turns, action.userInput);
-      } catch {
-        send({ type: "action_result", actionId: action.actionId, status: "rejected", errorCode: "invalid_state" });
-        return;
-      }
-
-      session.currentRole = action.role;
-      session.currentModel = { model: action.model, label: action.modelLabel };
-      const controller = new AbortController();
-      const runSignal = signal.aborted ? controller.signal : AbortSignal.any([signal, controller.signal]);
-      running = controller;
-      send({ type: "action_result", actionId: action.actionId, status: "accepted" });
-      send({ type: "status", status: "running" });
-
-      let run: Awaited<ReturnType<typeof runRefineSubagent>>;
-      try {
-        run = await runRefineSubagent(pi, ctx, {
-          prompt,
-          model: action.model,
-          taskType: spec.taskType,
-          signal: runSignal,
-        });
-      } catch {
-        if (running === controller) running = undefined;
-        if (!terminal) {
-          send({ type: "action_result", actionId: action.actionId, status: "failed", errorCode: "run_failed" });
-          send({ type: "status", status: "ready" });
-        }
-        return;
-      }
-      if (running !== controller || terminal) return;
-      running = undefined;
-
-      if (!run.ok || !run.output) {
-        send({ type: "action_result", actionId: action.actionId, status: "failed", errorCode: "run_failed" });
-        send({ type: "status", status: "ready" });
-        return;
-      }
-
-      const turn: RefineTurn = {
-        turnId: `turn-${sequence + 1}-${Math.random().toString(36).slice(2, 8)}`,
-        role: action.role,
-        modelLabel: action.modelLabel,
-        userInput: action.userInput,
-        output: run.output,
-        createdAt: run.createdAt ?? new Date().toISOString(),
-      };
-      session.turns.push(turn);
-      latestTurn = toTransportTurn(turn, session.turns.length - 1);
-      try {
-        await options.onOutput?.(turn);
-      } catch {
-        // The turn is already visible to the user; artifact persistence is
-        // best-effort and must not turn into a false refine failure.
-      }
-      send({ type: "turn", turn: latestTurn });
-      send({ type: "action_result", actionId: action.actionId, status: "succeeded", turnId: latestTurn.turnId });
-      send({ type: "status", status: "ready" });
+    handleAction(action) {
+      replay(action);
     },
 
     finalize(result: RefineTransportResult) {
       if (terminal) return;
       terminal = true;
-      send({
-        type: "action_result",
-        actionId: pendingApplyActionId ?? "apply",
-        status: "succeeded",
-        turnId: result.turnId,
-      });
       send({ type: "terminal", status: result.terminal ?? "applied" });
     },
   };
+}
+
+/**
+ * Wire one transport handle to a presenter. Exposed separately so the caller can
+ * decide whether the transport is worth attaching at all.
+ */
+export function attachRefineTransport(state: RefinePresenterState, handle: RefineTransportHandle): void {
+  state.start(handle);
 }

@@ -306,29 +306,28 @@ export function cycleRole(role: RefineRole, direction: 1 | -1): RefineRole {
 }
 
 /**
- * Present the refine session on a registered remote transport. Returns undefined
- * when no transport accepts, leaving the local TUI in control. The returned
- * promise resolves with the user's presentation choice; `finalize` on the result
- * commits the business terminal once the PlanStore has been updated.
+ * Attach a remote mirror to the local refine overlay. Returns undefined when no
+ * transport accepts, which is the normal local-only path. A transport failure
+ * here never removes the local overlay: it only removes the mirror.
  */
 function openRemoteRefinePanel(
-  pi: ExtensionAPI,
   ctx: PlanRefineContext,
   options: OpenRefinePanelOptions,
   session: RefineSession,
-): { promise: Promise<RefinePanelResult> } | undefined {
+): { state: RefinePresenterState; handle: RefineTransportHandle } | undefined {
+  const transports = getRefineTransports();
+  if (transports.length === 0) return undefined;
   const signal = options.signal ?? new AbortController().signal;
-  for (const transport of getRefineTransports()) {
+  if (signal.aborted) return undefined;
+  for (const transport of transports) {
     try {
       const state = createRefinePresenterState({
         sessionId: ctx.sessionManager.getSessionId(),
         markdown: options.markdown,
         revision: options.revision ?? 0,
         session,
-        signal,
         cwd: ctx.cwd,
         mode: ctx.mode,
-        ...(options.onOutput ? { onOutput: options.onOutput } : {}),
       });
       const request: RefineTransportRequest = {
         sessionId: ctx.sessionManager.getSessionId(),
@@ -342,28 +341,12 @@ function openRemoteRefinePanel(
         session,
         initialRole: session.currentRole,
         signal,
-        handleAction: (action) => state.handleAction(pi, ctx, action),
+        handleAction: async (action) => state.handleAction(action),
       };
       const handle = transport.open(request);
       if (!handle) continue;
       state.start(handle);
-      return {
-        promise: handle.promise
-          .then((result) => ({
-            action: result.action,
-            session,
-            latestOutput: state.latestTurn()?.output,
-            latestRole: state.latestTurn()?.role,
-            latestAppliesAs: state.latestTurn()?.appliesAs,
-            ...(result.action === "apply"
-              ? { finalize: (committed: RefineTransportResult) => state.finalize(committed) }
-              : {}),
-          }))
-          .catch((error) => {
-            console.error(`[maestro] Refine remote transport rejected: ${error instanceof Error ? error.message : String(error)}`);
-            return { action: "cancel" as const, session };
-          }),
-      };
+      return { state, handle };
     } catch (error) {
       console.error(`[maestro] Refine transport open failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -388,14 +371,15 @@ export async function openRefinePanel(
     : createRefineSession(initialRole, sessionModelLabel);
   if (!session.currentModel.model) session.currentModel = { model: resolveSessionModelKey(ctx), label: sessionModelLabel };
 
-  const remote = openRemoteRefinePanel(pi, ctx, options, session);
-  if (remote) return remote.promise;
+  // The local overlay is the authority; a remote transport only mirrors it.
+  const remote = openRemoteRefinePanel(ctx, options, session);
 
   const { renderRefineOverlay } = await import("../tui/plan-refine-overlay.ts");
   const result = await renderRefineOverlay(ctx, {
     markdown: options.markdown,
     session,
     roles: REFINE_ROLES,
+    ...(remote ? { mirror: remote.state.mirror } : {}),
     pickModel: async () => {
       const models = await listAvailableReviewModels(ctx);
       const picked = await pickReviewModel(ctx, models, options.signal);
@@ -428,7 +412,37 @@ export async function openRefinePanel(
     signal: options.signal,
   });
 
-  return result;
+  // Close the mirror exactly once: the local overlay already decided the outcome.
+  if (remote) {
+    try {
+      await remote.handle.cancel("tui_answered");
+    } catch {
+      // A detached transport must not change the local result.
+    }
+  }
+
+  const lastTurn = result.session.turns.at(-1);
+  return {
+    ...result,
+    ...(remote && result.action === "apply"
+      ? {
+          finalize: (committed: RefineTransportResult) => {
+            remote.state.finalize(committed);
+          },
+        }
+      : {}),
+    ...(remote && result.action !== "apply"
+      ? {
+          finalize: (committed: RefineTransportResult) => {
+            remote.state.finalize({
+              ...committed,
+              terminal: committed.terminal ?? (result.action === "discard" ? "discarded" : "cancelled"),
+            });
+          },
+        }
+      : {}),
+    ...(lastTurn ? { latestOutput: lastTurn.output, latestRole: lastTurn.role } : {}),
+  };
 }
 
 function resolveSessionModelKey(ctx: PlanRefineContext): string {

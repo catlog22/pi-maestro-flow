@@ -1295,6 +1295,9 @@ async function reviewPlan(
         if (outcome.action === "discard") {
           ctx.ui.notify("Refine result discarded; returning to the Plan preview.", "info");
         }
+        // An aborted signal is not a user decision; re-opening the confirm
+        // overlay in a dead turn would strand the user on it.
+        if (signal.aborted) return { approved: false, exited: false };
       }
       continue;
     }
