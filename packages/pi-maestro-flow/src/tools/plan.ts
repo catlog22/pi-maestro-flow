@@ -1213,6 +1213,7 @@ async function reviewPlan(
       const reviewedRevision = latestRevision;
       const outcome = await openRefinePanel(extensionApi, ctx, {
         markdown: latestPlan ?? "",
+        revision: reviewedRevision,
         initialRole,
         session: refineSession,
         signal,
@@ -1243,9 +1244,24 @@ async function reviewPlan(
         }
         if (refineLatestAppliesAs === "draft") {
           // Optimizer-style roles return a full draft: write it directly as the new current.md.
-          const saved = await savePlan(ctx, output, latestRevision, operation);
+          let saved: LoadedPlan | undefined;
+          try {
+            saved = await savePlan(ctx, output, latestRevision, operation);
+          } catch (error) {
+            ctx.ui.notify(`Failed to save refined plan: ${error instanceof Error ? error.message : String(error)}`, "warning");
+          }
           if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
           if (saved) {
+            // Only a committed PlanStore write may report the business terminal.
+            try {
+              await outcome.finalize?.({
+                action: "apply",
+                turnId: refineSession.turns.at(-1)?.turnId,
+                terminal: "applied",
+              });
+            } catch (error) {
+              console.error(`[maestro] Failed to finalize applied refine: ${error instanceof Error ? error.message : String(error)}`);
+            }
             refineLatestOutput = undefined;
             refineLatestRole = undefined;
             refineLatestAppliesAs = undefined;
@@ -1253,6 +1269,11 @@ async function reviewPlan(
             refineSession = undefined;
             refineSessionRevision = -1;
             ctx.ui.notify("Refine result applied to the Plan draft.", "info");
+          } else {
+            await outcome.finalize?.({
+              action: "apply",
+              terminal: "failed",
+            });
           }
           continue;
         }
@@ -1262,16 +1283,26 @@ async function reviewPlan(
         refineLatestRole = undefined;
         refineLatestAppliesAs = undefined;
         refineLatestRoleLabel = undefined;
-        return deliverPlanDiscussion(ctx, handoffDelivery, feedback);
+        const discussionResult = deliverPlanDiscussion(ctx, handoffDelivery, feedback);
+        await outcome.finalize?.({ action: "cancel", terminal: "cancelled" });
+        return discussionResult;
       }
       if (outcome.action === "discard" || outcome.action === "cancel") {
         refineLatestOutput = undefined;
         refineLatestRole = undefined;
         refineLatestAppliesAs = undefined;
         refineLatestRoleLabel = undefined;
+        // The mirror must learn the session ended even when the user walks away.
+        await outcome.finalize?.({
+          action: outcome.action,
+          terminal: outcome.action === "discard" ? "discarded" : "cancelled",
+        });
         if (outcome.action === "discard") {
           ctx.ui.notify("Refine result discarded; returning to the Plan preview.", "info");
         }
+        // An aborted signal is not a user decision; re-opening the confirm
+        // overlay in a dead turn would strand the user on it.
+        if (signal.aborted) return { approved: false, exited: false };
       }
       continue;
     }

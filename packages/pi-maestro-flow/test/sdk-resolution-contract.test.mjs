@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -8,9 +8,17 @@ import { parse } from "yaml";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(packageRoot, "..", "..");
-const npmCliPath = process.env.npm_execpath
-  ?? resolve(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-const npmCommand = [process.execPath, npmCliPath];
+function resolveNpmCommand() {
+  if (process.env.npm_execpath && existsSync(process.env.npm_execpath)) {
+    return [process.execPath, process.env.npm_execpath];
+  }
+  const candidateLib = resolve(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+  if (existsSync(candidateLib)) return [process.execPath, candidateLib];
+  const candidateDirect = resolve(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (existsSync(candidateDirect)) return [process.execPath, candidateDirect];
+  return [process.platform === "win32" ? "npm.cmd" : "npm"];
+}
+const npmCommand = resolveNpmCommand();
 const piSdkPackageNames = [
   "@earendil-works/pi-agent-core",
   "@earendil-works/pi-ai",

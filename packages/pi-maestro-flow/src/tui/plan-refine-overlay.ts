@@ -51,6 +51,37 @@ export interface RenderRefineOverlayOptions {
   run: (role: RefineRole, model: string, label: string, userInput: string, signal: AbortSignal) => Promise<RefineRunResult>;
   signal?: AbortSignal;
   now?: () => number;
+  /**
+   * Optional remote mirror. The local overlay stays the sole authority for the
+   * refine session; the mirror only receives state snapshots and may feed user
+   * intents back in. A failing or detached mirror never affects this overlay.
+   */
+  mirror?: RefineOverlayMirror;
+}
+
+/** Authoritative state the overlay publishes to a remote mirror. */
+export interface RefineOverlayMirrorState {
+  readonly session: RefineSession;
+  readonly phase: Phase;
+  readonly status: string;
+  readonly latestTurnId?: string;
+}
+
+/** A remote surface's request, replayed against the local authority. */
+export type RefineOverlayIntent =
+  | { type: "run"; role: RefineRole; model: string; label: string; userInput: string }
+  | { type: "apply"; turnId?: string }
+  | { type: "discard" }
+  | { type: "cancel" }
+  | { type: "select_role"; role: RefineRole }
+  | { type: "select_model"; model: string; label: string }
+  | { type: "snapshot_request" };
+
+export interface RefineOverlayMirror {
+  /** Receive the current authoritative state; called after every change. */
+  publish(state: RefineOverlayMirrorState): void;
+  /** Register the intent handler; returns an unsubscribe function. */
+  onIntent(handler: (intent: RefineOverlayIntent) => void): () => void;
 }
 
 export interface RenderRefineOverlayResult {
@@ -104,6 +135,23 @@ export async function renderRefineOverlay(
 
   const now = options.now ?? Date.now;
 
+  let disposeMirrorIntents: (() => void) | undefined;
+
+  /** Publish the authoritative state so a remote mirror can render it. */
+  function publishState(): void {
+    if (!options.mirror) return;
+    try {
+      options.mirror.publish({
+        session: { ...session, turns: [...session.turns] },
+        phase,
+        status,
+        ...(session.turns.at(-1)?.turnId ? { latestTurnId: session.turns.at(-1)!.turnId } : {}),
+      });
+    } catch {
+      // A detached mirror must never break the local authority.
+    }
+  }
+
   function currentPreviewSource(): string {
     if (previewMode === "output" && session.turns.length > 0) {
       return session.turns[selectedTurnIndex]?.output ?? "";
@@ -136,6 +184,7 @@ export async function renderRefineOverlay(
     phase = "idle";
     busyError = "";
     status = `${options.roles[session.currentRole].label} cancelled.`;
+    publishState();
     if (render) host?.requestRender();
   }
 
@@ -148,18 +197,25 @@ export async function renderRefineOverlay(
     if (options.signal.aborted) onParentAbort();
   }
 
-  async function runRole(): Promise<void> {
-    const spec = options.roles[session.currentRole];
-    const model = session.currentModel.model;
-    const label = session.currentModel.label;
+  async function runRole(overrides?: { role: RefineRole; model: string; label: string; userInput: string }): Promise<void> {
+    const spec = options.roles[overrides?.role ?? session.currentRole];
+    const model = overrides?.model ?? session.currentModel.model;
+    const label = overrides?.label ?? session.currentModel.label;
     if (!model) {
       status = "No model selected — press m to pick one.";
+      publishState();
       host?.requestRender();
       return;
+    }
+    if (overrides) {
+      session.currentRole = overrides.role;
+      session.currentModel = { model: overrides.model, label: overrides.label };
+      pendingInput = overrides.userInput;
     }
     phase = "running";
     busyError = "";
     status = `Running ${spec.label}…`;
+    publishState();
     const controller = new AbortController();
     const signal = options.signal
       ? AbortSignal.any([options.signal, controller.signal])
@@ -183,14 +239,15 @@ export async function renderRefineOverlay(
       return;
     }
     host?.requestRender();
+    const runInput = pendingInput;
     try {
-      const result = await options.run(session.currentRole, model, label, pendingInput, signal);
+      const result = await options.run(session.currentRole, model, label, runInput, signal);
       if (activeRun !== run || signal.aborted) return;
       if (result.ok && result.output) {
         const turn: RefineTurn = {
           role: session.currentRole,
           modelLabel: label,
-          userInput: pendingInput,
+          userInput: runInput,
           output: result.output,
           createdAt: result.createdAt ?? new Date().toISOString(),
         };
@@ -202,14 +259,17 @@ export async function renderRefineOverlay(
         status = result.warning
           ? result.warning
           : `${spec.label} done — R toggles Plan/Output, [ ] cycles history.`;
+        publishState();
       } else {
         busyError = result.error ?? "unknown error";
         status = `${spec.label} failed: ${busyError}`;
+        publishState();
       }
     } catch (error) {
       if (activeRun !== run || signal.aborted) return;
       busyError = error instanceof Error ? error.message : String(error);
       status = `${spec.label} failed: ${busyError}`;
+      publishState();
     } finally {
       if (activeRun !== run) return;
       activeRun = undefined;
@@ -218,6 +278,7 @@ export async function renderRefineOverlay(
       pendingInput = "";
       input.setValue("");
       phase = "idle";
+      publishState();
       host?.requestRender();
     }
   }
@@ -228,6 +289,7 @@ export async function renderRefineOverlay(
     if (picked) {
       session.currentModel = { model: picked.model, label: picked.label };
       status = `Model: ${picked.label}`;
+      publishState();
       host?.requestRender();
     }
   }
@@ -237,6 +299,7 @@ export async function renderRefineOverlay(
     phase = "input";
     input.setValue(pendingInput);
     status = "";
+    publishState();
     host?.requestRender();
   }
 
@@ -245,6 +308,7 @@ export async function renderRefineOverlay(
     if (row === "role") {
       session.currentRole = cycleRoleLocal(session.currentRole, 1);
       status = "";
+      publishState();
       host?.requestRender();
       return;
     }
@@ -263,6 +327,7 @@ export async function renderRefineOverlay(
     if (row === "apply") {
       if (session.turns.length === 0) {
         status = "No refine result to apply — run review/refine first.";
+        publishState();
         host?.requestRender();
         return;
       }
@@ -270,6 +335,41 @@ export async function renderRefineOverlay(
       return;
     }
     if (row === "discard") doneAction("discard");
+  }
+
+  /** Apply one remote intent against the local authority. */
+  function applyIntent(intent: RefineOverlayIntent): void {
+    if (settled) return;
+    switch (intent.type) {
+      case "run":
+        if (phase === "running") return;
+        void runRole({ role: intent.role, model: intent.model, label: intent.label, userInput: intent.userInput });
+        return;
+      case "apply":
+        if (phase === "running" || session.turns.length === 0) return;
+        doneAction("apply");
+        return;
+      case "discard":
+        if (phase === "running") return;
+        doneAction("discard");
+        return;
+      case "cancel":
+        doneAction("cancel");
+        return;
+      case "select_role":
+        session.currentRole = intent.role;
+        publishState();
+        host?.requestRender();
+        return;
+      case "select_model":
+        session.currentModel = { model: intent.model, label: intent.label };
+        publishState();
+        host?.requestRender();
+        return;
+      case "snapshot_request":
+        publishState();
+        return;
+    }
   }
 
   function selectionLine(row: SelectionRow, label: string): Frame[number] {
@@ -452,6 +552,15 @@ export async function renderRefineOverlay(
     },
   };
 
+  if (options.mirror) {
+    try {
+      disposeMirrorIntents = options.mirror.onIntent(applyIntent);
+    } catch {
+      disposeMirrorIntents = undefined;
+    }
+    publishState();
+  }
+
   const result = await openOverlay<RenderRefineOverlayResult>(
     ctx,
     {
@@ -481,6 +590,8 @@ export async function renderRefineOverlay(
     },
   );
 
+  disposeMirrorIntents?.();
+  disposeMirrorIntents = undefined;
   return result ?? { action: "cancel", session: options.session };
 }
 

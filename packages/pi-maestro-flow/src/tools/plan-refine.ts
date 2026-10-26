@@ -22,6 +22,10 @@ import {
   buildReviewPrompt,
 } from "./plan-review.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
+import type { RefineTransportRequest, RefineTransportResult } from "../refine-transport.ts";
+import { getRefineTransports } from "../refine-transport.ts";
+import type { RefinePresenterState } from "../refine-presenter.ts";
+import { createRefinePresenterState } from "../refine-presenter.ts";
 
 const DEFAULT_REFINE_TIMEOUT_MS = 180_000;
 /** Cap each prior turn injected into the next role prompt. */
@@ -33,6 +37,8 @@ export type RefineRole = "reviewer" | "decomposer" | "optimizer" | "brainstormer
 export type RefineAppliesAs = "feedback" | "draft";
 
 export interface RefineTurn {
+  /** Stable identity for remote presentation; older local sessions may omit it. */
+  turnId?: string;
   role: RefineRole;
   modelLabel: string;
   /** User instruction for this run; empty for a bare first pass. */
@@ -75,6 +81,7 @@ export interface RunRefineOptions {
 
 export interface OpenRefinePanelOptions {
   markdown: string;
+  revision?: number;
   initialRole?: RefineRole;
   session?: RefineSession;
   signal?: AbortSignal;
@@ -87,11 +94,16 @@ export interface RefinePanelResult {
   latestOutput?: string;
   latestRole?: RefineRole;
   latestAppliesAs?: RefineAppliesAs;
+  /**
+   * Remote presentation only: complete the business terminal after the caller
+   * has committed the Apply through the PlanStore. Absent for local TUI.
+   */
+  finalize?: (result: RefineTransportResult) => void | Promise<void>;
 }
 
-type PlanRefineContext = Pick<
+export type PlanRefineContext = Pick<
   ExtensionContext,
-  "cwd" | "hasUI" | "ui" | "mode" | "model" | "modelRegistry" | "isProjectTrusted"
+  "cwd" | "hasUI" | "ui" | "mode" | "model" | "modelRegistry" | "isProjectTrusted" | "sessionManager"
 >;
 
 const REFINE_ROLE_ORDER: RefineRole[] = ["reviewer", "decomposer", "optimizer", "brainstormer"];
@@ -295,6 +307,55 @@ export function cycleRole(role: RefineRole, direction: 1 | -1): RefineRole {
 }
 
 /**
+ * Attach a remote mirror to the local refine overlay. Returns undefined when no
+ * transport accepts, which is the normal local-only path. A transport failure
+ * here never removes the local overlay: it only removes the mirror.
+ */
+function openRemoteRefinePanel(
+  ctx: PlanRefineContext,
+  options: OpenRefinePanelOptions,
+  session: RefineSession,
+): RefinePresenterState | undefined {
+  const transports = getRefineTransports();
+  if (transports.length === 0) return undefined;
+  const signal = options.signal ?? new AbortController().signal;
+  if (signal.aborted) return undefined;
+  for (const transport of transports) {
+    try {
+      const state = createRefinePresenterState({
+        sessionId: ctx.sessionManager.getSessionId(),
+        markdown: options.markdown,
+        revision: options.revision ?? 0,
+        session,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+      });
+      const request: RefineTransportRequest = {
+        sessionId: ctx.sessionManager.getSessionId(),
+        refineSessionId: state.refineSessionId,
+        operationId: state.operationId,
+        target: state.target,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        markdown: options.markdown,
+        revision: options.revision ?? 0,
+        session,
+        initialRole: session.currentRole,
+        signal,
+        handleAction: async (action) => state.handleAction(action),
+      };
+      const handle = transport.open(request);
+      if (!handle) continue;
+      state.start(handle);
+      return state;
+    } catch (error) {
+      console.error(`[maestro] Refine transport open failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Drive the Review & Refine panel. Delegates the TUI rendering/interaction to
  * `tui/plan-refine-overlay.ts` while owning the model picker and the run loop.
  * Returns the final session, selected action, and latest output metadata.
@@ -311,11 +372,15 @@ export async function openRefinePanel(
     : createRefineSession(initialRole, sessionModelLabel);
   if (!session.currentModel.model) session.currentModel = { model: resolveSessionModelKey(ctx), label: sessionModelLabel };
 
+  // The local overlay is the authority; a remote transport only mirrors it.
+  const mirror = openRemoteRefinePanel(ctx, options, session);
+
   const { renderRefineOverlay } = await import("../tui/plan-refine-overlay.ts");
   const result = await renderRefineOverlay(ctx, {
     markdown: options.markdown,
     session,
     roles: REFINE_ROLES,
+    ...(mirror ? { mirror: mirror.mirror } : {}),
     pickModel: async () => {
       const models = await listAvailableReviewModels(ctx);
       const picked = await pickReviewModel(ctx, models, options.signal);
@@ -348,7 +413,29 @@ export async function openRefinePanel(
     signal: options.signal,
   });
 
-  return result;
+  const lastTurn = result.session.turns.at(-1);
+  return {
+    ...result,
+    ...(mirror
+      ? {
+          finalize: (committed: RefineTransportResult) => {
+            mirror.finalize({
+              ...committed,
+              terminal: committed.terminal ?? (result.action === "discard" ? "discarded" : "cancelled"),
+            });
+          },
+        }
+      : {}),
+    ...(lastTurn
+      ? {
+          latestOutput: lastTurn.output,
+          latestRole: lastTurn.role,
+          // plan.ts branches on this to decide whether the role returns a full
+          // draft (optimizer) or discussion feedback.
+          latestAppliesAs: REFINE_ROLES[lastTurn.role].appliesAs,
+        }
+      : {}),
+  };
 }
 
 function resolveSessionModelKey(ctx: PlanRefineContext): string {
