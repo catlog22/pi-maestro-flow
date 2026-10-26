@@ -22,8 +22,13 @@ import {
   buildReviewPrompt,
 } from "./plan-review.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
-import type { RefineTransportRequest, RefineTransportResult } from "../refine-transport.ts";
+import type {
+  RefineTransportHandle,
+  RefineTransportRequest,
+  RefineTransportResult,
+} from "../refine-transport.ts";
 import { getRefineTransports } from "../refine-transport.ts";
+import type { RefinePresenterState } from "../refine-presenter.ts";
 import { createRefinePresenterState } from "../refine-presenter.ts";
 
 const DEFAULT_REFINE_TIMEOUT_MS = 180_000;
