@@ -98,6 +98,12 @@ Policy classification 优先；外部/不确定/降级决策、human-only 问题
 - Plan seam 用于 confirm/review，携带当前 revision、可用 action、draft 与模型切换信息；远程 edit 要提交 expectedRevision，避免覆盖更新的计划。
 - Plan 本地/远程 decision/edit/cancel 竞速；v0.32.0 中 transport promise 失败保留本地界面与重连请求，明确取消/中止才清理剩余 surface。集成不能绕过批准与 revision 边界。
 
+### 可选 Refine 远程呈现镜像（v0.35.0）
+
+Refine 新增独立的可选 transport registry，镜像状态/轮次并回传 run、apply、discard、cancel 等意图；不附带远程客户端 UI。**本地 TUI 面板仍是唯一权威**，拥有子代理、轮次和结束决策；镜像不运行第二个子代理，连接失败不关闭本地面板。
+
+优化角色的完整草稿只有经 PlanStore 提交后才报告 `applied`；保存失败不能由远程层宣告应用成功。Reviewer/decomposer/brainstormer 的反馈仍返回 Plan 讨论，不报告草稿已应用；Refine Apply 也不是 Plan 批准。取消/丢弃会同步结束状态，abort 不重新打开已中止 turn 的确认面板。
+
 ### 切换方式
 
 `Alt+Shift+P` 或 `/plan` 切换 Plan/Act 模式。`ask` / `plan-confirm` / `plan-editor` / `plan-review` 等交互工具支持取消透传：中止信号会沿权限提示与 teammate 交互中继向前传递，ask 按顺序执行。

@@ -179,7 +179,7 @@ monitor({ action: "unsubscribe", subscriptionId: "<返回的 subscriptionId>" })
 
 ## 启动器解析与结构化诊断（v0.29+）
 
-teammate 启动子进程 Pi 时不经过 shell，按固定优先级解析可执行文件并记录来源（provenance）：显式覆盖 → 原生 PATH 二进制 → 校验过的 Windows npm shim → 校验过的宿主包 bin → 兼容 fallback。每一次 spawn、child-error、close 事件都携带结构化诊断：有界 stderr、exit code、signal、生命周期阶段与 launcher 来源，跨进程排障时直接看这些字段，不用猜测进程是怎么起来的。
+teammate 启动子进程 Pi 时不经过 shell，并记录启动来源（provenance）。显式 `PI_TEAMMATE_PI_BINARY` 覆盖仍优先；Teammate 2.10.1 在 Bun 编译的原生 `pi` / `pi-bolt` 宿主（含 `.exe`）中直接复用当前可执行文件（`host-native`），避免 PATH 转发进程丢失 child IPC。其他宿主继续使用既有 PATH、已验证 Windows npm shim/宿主包 bin 与兼容 fallback 解析；Windows 优先尝试已验证宿主入口。每一次 spawn、child-error、close 事件都携带结构化诊断：有界 stderr、exit code、signal、生命周期阶段与 launcher 来源，跨进程排障时直接看这些字段，不用猜测进程是怎么起来的。
 
 前台 teammate 与 `bash_bg run` 共享同一个会话级 Alt+B 分发器（`foreground-detach` 公共面）：TUI 中按 `Alt+B` 把前台调用立刻转入后台，嵌套调用按最外层优先分离。详见[bash_bg 与 observe](/guides/bash-bg-observe)。
 

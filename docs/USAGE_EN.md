@@ -59,13 +59,13 @@
 
 ### Install
 
-> **v0.34.1:** fixes compaction preflight host-module loading. Only Flow changes; verification was skipped at the user's request. See [RELEASE.md](../RELEASE.md).
+> **v0.35.0 — Remote Refine Mirror & Runtime Fixes:** Flow 0.35.0, Teammate 2.10.1, Cockpit 0.24.5; other packages unchanged. Optional Refine mirroring retains local TUI authority and reports applied only after the Plan draft commits. Also fixes tool-schema compatibility, native Bun host IPC, ChatGPT/Codex quota separation, and Flow Git polling. See the [changelog](../docs-site/src/content/docs/guides/changelog.en.md) and [RELEASE.md](../RELEASE.md).
 
 > **v0.34.0 baseline:** Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0, Cockpit 0.24.4; other packages unchanged. The engine remains `maestro-flow >=0.5.91` (latest upstream/local 0.5.92, not an exact pin). Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
@@ -86,7 +86,7 @@ On Pi 0.99+, the host owns the tool loadout, `tool_search`, model/classifier run
 
 - `search` replaces `ffgrep`: literal/regex/fuzzy matching and lines/files/count output; bounded `rg` handles unavailable indexes and root-wide plain/regex searches. Fuzzy still requires the index. Narrow path/glob for large projects.
 - `open-code-review` needs a separately installed `ocr` CLI. `preview`/`rules` resolve files/rules only; `review` performs OCR-managed review with the runtime model; `health` checks connectivity. Configure the model via `/api-manager open-code-review`; see `packages/pi-maestro-flow/optional/OCR-SETUP.md` for installation.
-- Optional Ask transports race the local TUI and cancel the other surface; Mobile cancellation also closes the local wizard. Plan confirm/review exposes an optional transport seam with revision checks, not a promise that every client already has a Plan UI.
+- Optional Ask transports race the local TUI and cancel the other surface; Mobile cancellation also closes the local wizard. Plan confirm/review exposes an optional transport seam with revision checks, not a promise that every client already has a Plan UI. The v0.35.0 Refine transport instead mirrors the local panel and relays intents without running another subagent. The local TUI stays authoritative and survives mirror failure. Optimized drafts report `applied` only after the PlanStore commit; review feedback still returns to discussion, not draft application or Plan approval.
 - Native Quiet mode toggles live without activating extra tools; initial resumed-history rendering and third-party execution-only overrides remain limitations. See the docs-site [Cockpit guide](../docs-site/src/content/docs/guides/cockpit.md).
 
 ### Registered Tools Overview
@@ -1403,7 +1403,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 
 # ─── Knowledge ───
 maestro search "query" --code

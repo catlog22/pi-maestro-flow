@@ -1,3 +1,109 @@
+# v0.35.0 — Refine Transport & Unified Runtime Lifecycles
+
+## Overview
+
+Flow **0.35.0**, Teammate **2.10.1**, and Cockpit **0.24.5** include all pending
+changes and the commits since **v0.34.1**. The other ten publishable workspace
+packages have unchanged tarball SHA-1s matching npm. Before the release metadata
+commit, the range `v0.34.1..e250dfcf` contains **12 commits**; the working release
+snapshot spans **42 files**, approximately **1.7k additions / 0.2k deletions**.
+
+## Changes
+
+- **Optional Refine transport:** remote surfaces can mirror authoritative Refine
+  snapshots/events and relay actions. The local TUI retains authority; Flow owns
+  subagents, revisions and terminal outcomes. Applied success follows the actual
+  PlanStore commit, not a presentation-layer choice. Discard/cancel terminal
+  events and subagent-error fallback are synchronized.
+  Sources: `src/refine-transport.ts` (+170 lines), `src/refine-presenter.ts`
+  (+216), `src/tools/plan-refine.ts`, `src/tools/plan.ts`, and
+  `src/tui/plan-refine-overlay.ts` in Flow.
+- **Model-facing tool schemas:** browser/computer-use declarations omit unsupported
+  conditionals; teammate routing maps avoid `patternProperties`. Action validation
+  and the full browser/computer-use schemas remain intact. No live Gemini/xAI
+  inference acceptance is claimed. Sources: Flow `src/tools/browser-tool.ts`,
+  `computer-use-tool.ts`, and `teammate-session-routing.ts`.
+- **One Git polling lifecycle:** footer replacements reuse the original 30-second
+  polling clock. Branch refreshes retain a shared five-second minimum interval,
+  single in-flight request, trailing coalescing and session/footer result fences.
+  Tool/agent completion does not query Git; hidden/headless footers do not poll.
+  The Vitest adapter now pairs timer creation with cancellation APIs.
+  Sources: Flow `src/statusline/statusline.ts`, `test/statusline.test.ts`, and
+  `test/shims/node-test.ts`.
+- **Native teammate launch:** compiled Bun Pi/pi-bolt hosts launch their own
+  executable ahead of PATH shims, preserving direct child IPC. Explicit binary
+  overrides retain precedence. Sources: Teammate `src/runs/execution-infra.ts`
+  (+8 lines) and matching public declarations/native-launch regressions.
+- **Account usage:** official ChatGPT authentication is distinct from Codex;
+  direct-login tokens are not sent to WHAM. Unexposed subscription quota links
+  users to ChatGPT settings instead. Account changes clear cached usage and
+  re-resolve credentials. Sources: Cockpit `src/usage/core.ts` (+16) and
+  `src/usage/extension.ts` (+22/-2).
+- **Repository fixtures:** preserve effective global routing after session-clear,
+  follow relocated Plan instructions, and test bounded observation output without
+  requiring an oversized view to include every retained result. Project Codex
+  Fast configuration is included as requested.
+
+## Versions and upgrade
+
+| Package | Version |
+|---|---|
+| pi-maestro-flow | 0.35.0 |
+| pi-maestro-teammate | 2.10.1 |
+| pi-cockpit | 0.24.5 |
+| pi-maestro-settings-core | 0.2.3 (unchanged) |
+| pi-maestro-backend-core / pi-maestro-backends | 0.1.5 / 0.1.7 (unchanged) |
+| pi-maestro-fabric / pi-maestro-fabric-core | 0.1.0 (unchanged) |
+| pi-fluent-tui | 0.1.2 (unchanged) |
+| @dyw1234/active-win | 9.0.1 (unchanged) |
+| @dyw1234/nut-js / nut-shared / nut-provider-interfaces | 4.2.7 (unchanged) |
+
+Exact companion dependencies and workspace lock entries are synchronized without
+unrelated peer-dependency pruning. `maestro-flow >=0.5.91` is retained and includes
+current npm/local upstream **0.5.92**. Pi validation baseline **0.99.0**, optional
+host peers `*`, and Node minimum **22.19.0** are unchanged.
+
+```bash
+pi install npm:pi-maestro-flow@0.35.0
+```
+
+Close Pi before upgrading and restart afterward. Update preserved local companion
+overrides to Teammate **2.10.1** and Cockpit **0.24.5**. The remote Refine export is
+an integration seam, not a claim that every client implements a Refine UI.
+
+## Verification and limits
+
+- **318 unique selected tests passed:** Flow **182**, Teammate **82**, Cockpit
+  **54**. Three changed-package typechecks, teammate declaration consistency,
+  all 13 workspace manifest/lock entries and exact dependency closure passed.
+- Model-facing schema assertions passed with browser/computer-use action
+  conditionals retained. The two Pi-host compaction regressions from v0.34.1
+  now pass, including a managed tree without a local SDK and virtual host modules.
+- Initial failures are not hidden: three Chromium tests exceeded Vitest's default
+  timeout/collateral target closure and passed under their native Node runner;
+  three stale assertions passed after focused repairs. Eight timer cases initially
+  failed; seven passed after Date mocking, while the ownership case exhausted
+  three validation attempts. After explicit user authorization to unify ownership,
+  paired cancellation mocks and the shared polling lifecycle passed all 30 cases.
+- Two additional **unchanged optional-desktop tests failed**: the native-provider
+  contract still expects pre-v0.32 dependency versions, and its import probe finds
+  a local `libnut` installation missing `@nut-tree-fork/shared`. These are not
+  passing checks; optional dependency versions/runtime were not changed here.
+  Native desktop input/OCR/model inference, live provider inference, minimum-Node
+  and macOS/Linux acceptance are not claimed by this release.
+- Verification follows changed behavior and directly affected package boundaries;
+  the unrelated root `test:release` matrix was not run. Passing results are reused,
+  with only materially invalidated or failed targets rerun. Name-filter exclusions
+  are not disabled test cases.
+- Documentation `tsc && vite build` passed (2466 modules); the existing >500 kB
+  chunk advisory remains. No browser visual validation is claimed.
+- Packaging and registry install/startup results are recorded below only after
+  execution; no previous release's verification waiver is reused.
+
+---
+
+## Historical v0.34.1 notes
+
 # v0.34.1 — Pi Host Compaction Loading Fix
 
 > Fast patch release: the user explicitly authorized skipping verification for

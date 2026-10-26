@@ -5,7 +5,19 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前版本：v0.34.1 — 压缩预检宿主模块加载修复。** 本版按用户要求跳过验证。 Node.js 最低 22.19.0，Pi 验证基线 0.99.0；既有原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。历史版本记录与安装命令保留原值；本次测试、构建与发布证据由仓库 RELEASE.md 记录，不在此预先声明通过。
+> **当前版本：v0.35.0 — Refine 远程镜像与运行时修复。** Node.js 最低 22.19.0，Pi 验证基线 0.99.0，引擎要求 `maestro-flow >=0.5.91` 不变。既有原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证；不声明全平台或远程客户端就绪。历史版本记录与安装命令保留原值；发布证据见仓库 RELEASE.md。
+
+## v0.35.0 — Refine 远程镜像与运行时修复
+
+- Flow **0.35.0**、Teammate **2.10.1**、Cockpit **0.24.5**；其他包及宿主/引擎基线不变。
+- **可选 Refine 镜像**：独立 transport registry/presenter 镜像状态与轮次、回传操作意图。本地 TUI 保持子代理、轮次与结束决策的唯一权威；镜像失败不关闭本地面板，不附带远程客户端 UI。优化草稿经 PlanStore 提交后才报告 `applied`；评审反馈仍返回讨论，Apply 不等于 Plan 批准。取消/丢弃同步结束状态，abort 不重开已中止 turn 的确认界面。见 [Goal/Plan](/guides/goal-plan-todo)。
+- **工具 schema 兼容**：`browser` / `computer_use` 的模型声明省略不支持的条件 schema；`teammate-session-routing` 的 map 用 `additionalProperties` 替代 `patternProperties`，避免 Gemini/xAI 拒绝声明。运行时动作/参数与 taskType 校验保留，不放宽执行权限。
+- **原生 Bun 宿主 IPC**：Bun 编译的 `pi` / `pi-bolt`（含 `.exe`）直接复用宿主可执行文件启动 child，避免 PATH 转发进程丢失 IPC；显式 binary override 仍优先。见[调度指南](/guides/teammate-dispatch)。
+- **配额与账号切换**：官方 ChatGPT（`openai`）与 Codex（`openai-codex`）分开；Pi 未暴露订阅配额时隐藏数值、提示查看 `https://chatgpt.com/settings/usage`，不拿直登凭证探测 Codex WHAM。账号变更清除对应 provider 缓存；当前 provider 取消旧查询并刷新，手动刷新模式不自动查询。
+- **Flow Git 轮询**：footer 替换保留单一轮询生命周期；30 秒周期、查询启动至少间隔 5 秒，串行合并待刷新请求。工具/agent 完成不再触发 Git 查询；headless 或 Cockpit 拥有 footer 时不轮询。
+- **验证范围**：复用发布主流程已运行的 Flow **172** + Teammate **82** + Cockpit **54**，合计 **308** 个唯一通过用例；不由此推导全平台、远程 UI 或安装/发布验收通过。
+
+升级：`pi install npm:pi-maestro-flow@0.35.0`。升级前关闭 Pi，完成后重启；保留的本地 companion 覆盖需同步到 Teammate 2.10.1 / Cockpit 0.24.5。
 
 ## v0.34.1 — 压缩预检宿主模块加载修复
 

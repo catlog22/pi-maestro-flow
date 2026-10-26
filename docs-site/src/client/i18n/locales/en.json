@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.34.1 — Pi Host Compaction Loading Fix (verification skipped). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.34.1",
+    "title": "v0.35.0 — Remote Refine Mirror & Runtime Fixes. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.35.0",
     "close": "Dismiss"
   },
   "accessibility": {

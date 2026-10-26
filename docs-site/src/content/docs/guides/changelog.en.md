@@ -5,7 +5,19 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current version: v0.34.1 — Pi Host Compaction Loading Fix.** Verification was skipped at the user's request. Node.js minimum 22.19.0 and Pi 0.99.0 baseline are unchanged; existing native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions/install commands retain their original values; this release's tests, build and publication evidence belong in repository RELEASE.md, not a premature pass claim here.
+> **Current version: v0.35.0 — Remote Refine Mirror & Runtime Fixes.** Node.js minimum 22.19.0, Pi 0.99.0 baseline and `maestro-flow >=0.5.91` remain unchanged. Existing native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified. No cross-platform or remote-client readiness claim is made. Historical versions/install commands retain their original values; publication evidence belongs in repository RELEASE.md.
+
+## v0.35.0 — Remote Refine Mirror & Runtime Fixes
+
+- Flow **0.35.0**, Teammate **2.10.1**, Cockpit **0.24.5**; other packages and host/engine baselines unchanged.
+- **Optional Refine mirror**: a separate transport registry/presenter mirrors state and turns and relays action intents. The local TUI alone owns the subagent, turns and terminal decision; mirror failure leaves it usable. No remote client UI is bundled. Optimized drafts report `applied` only after the PlanStore commit; review feedback returns to discussion, and Apply is not Plan approval. Discard/cancel publish terminal state; abort does not reopen confirmation in a dead turn. See [Goal/Plan](/guides/goal-plan-todo).
+- **Tool-schema compatibility**: model declarations for `browser` / `computer_use` omit unsupported conditionals; `teammate-session-routing` maps use `additionalProperties` instead of `patternProperties` to avoid Gemini/xAI declaration rejection. Runtime action/parameter and taskType validation remain, without widening execution permissions.
+- **Native Bun host IPC**: Bun-compiled `pi` / `pi-bolt` (including `.exe`) spawn the host executable directly so PATH forwarding processes cannot drop child IPC. Explicit binary overrides still take precedence. See [dispatch](/guides/teammate-dispatch).
+- **Quota/account changes**: official ChatGPT (`openai`) stays separate from Codex (`openai-codex`). When Pi does not expose subscription quota, numbers are hidden with a link to `https://chatgpt.com/settings/usage`; direct-login credentials never probe Codex WHAM. Account changes clear the affected provider cache; the active provider cancels its old request and refreshes, unless manual-refresh mode is enabled.
+- **Flow Git polling**: footer replacement retains one polling lifecycle, with a 30-second period, at least 5 seconds between query starts, and serialized/coalesced requests. Tool/agent completion no longer triggers Git queries; headless and Cockpit-owned footers do not poll.
+- **Verification scope**: reuses the release owner's executed Flow **172** + Teammate **82** + Cockpit **54** results: **308** unique passing cases. These do not establish cross-platform, remote-UI, installation or publication acceptance.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.35.0`. Close Pi first, restart afterward, and update preserved local companion overrides to Teammate 2.10.1 / Cockpit 0.24.5.
 
 ## v0.34.1 — Pi Host Compaction Loading Fix
 

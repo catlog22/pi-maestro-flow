@@ -15,9 +15,9 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.34.1` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.35.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **v0.34.1 — Pi Host Compaction Loading Fix:** compaction preflight uses the Pi host package directory, supporting managed installations without a local SDK and host virtual modules. Only Flow changes; verification was skipped at the user's request.
+> **v0.35.0 — Remote Refine Mirror & Runtime Fixes:** Flow 0.35.0, Teammate 2.10.1, Cockpit 0.24.5; other packages unchanged. Optional Refine mirroring keeps local TUI authority and reports applied only after the Plan draft commits. Tool-schema compatibility, native Bun host IPC, ChatGPT/Codex quota separation and Flow Git polling are also fixed. See the [changelog](../../docs-site/src/content/docs/guides/changelog.en.md) and [RELEASE.md](../../RELEASE.md).
 
 > **v0.34.0 baseline — Browser Recording, Compaction Summaries & Runtime Stability:** Flow 0.34.0, Teammate 2.10.0 and Cockpit 0.24.4; Backends 0.1.7 and all other packages unchanged. The engine remains `maestro-flow >=0.5.91` (latest upstream/local 0.5.92, not an exact pin). Browser WebM recording requires FFmpeg with VP8/WebM support, persists artifacts after tab closure, and adds chapter/action presentation on managed/profile/CDP (not extension). Compaction exposes summary thinking/timeout settings, progress and retry/usage metrics. Teammate aligns routing guidance, adds Monitor lifecycle subscriptions and hardens workspace root delivery; Cockpit improves viewport/terminal stability. HTTP/2/unknown/stream-read retries and bounded observation/RPC/search/error previews improve failure handling without changing approval or success-evidence boundaries.
 
@@ -81,7 +81,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -97,7 +97,7 @@ After installation:
 - Pi 0.99+ uses native `/mcp` and `/mcp login <name>`; `/mcp auth` is legacy-only. Disable `builtin:mcp` before previewing and approving migration with `/maestro-mcp-migrate`.
 - `open-code-review` integrates a separately installed `ocr` CLI for preview/rules/review/health; configure its review model via `/api-manager open-code-review` (see `optional/OCR-SETUP.md`).
 - Native Cockpit Quiet mode toggles live without changing execution or activating extra tools; first resumed-history rendering may still be official, and third-party execution-only overrides cannot be identified by the public API.
-- Ask transports race the local TUI with cancellation cleanup; Plan confirm/review exposes an optional transport seam, not a bundled remote client UI.
+- Ask transports race the local TUI with cancellation cleanup; Plan confirm/review exposes an optional transport seam, not a bundled remote client UI. Refine's optional presentation mirror relays intents to the authoritative local overlay without running a second subagent; mirror failure leaves the TUI usable. Optimized drafts report `applied` only after the PlanStore commit; feedback continues the discussion, not draft application or Plan approval.
 - DSH users must install the optional peer `@deepseek-ai/dsh-sdk-client` manually; the development baseline is 0.1.0-rc.6.
 - Session export is available through `/export-session-info`
 - Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall. Flow records the companion sources it manages so upgrades can replace those paths safely; an unowned same-name local registration is retained and logged rather than overwritten.
@@ -615,14 +615,14 @@ Skills are authored and maintained by the [Maestro Flow](https://github.com/catl
 the bundled `.pi/skills/` directory. In this repository the canonical source set lives under
 the root `.pi/skills`; prepack copies it into `packages/pi-maestro-flow/.pi/skills` for npm,
 while the root `.pi/settings.json` references its local `skills` directory for development. Install the package through
-`pi install npm:pi-maestro-flow@0.33.0` (or register a local package path) and Pi discovers
+`pi install npm:pi-maestro-flow@0.35.0` (or register a local package path) and Pi discovers
 the bundled skills through its standard package resource loader.
 
 Project system instructions use `.pi/SYSTEM.md` as their single authority; the
 previous bundled `AGENTS.md` injection is retired. Migrate projects that depended
 on that old injection to `.pi/SYSTEM.md`.
 
-`pi-maestro-flow@0.33.0` requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin). Package installation does not imply model inference validation.
+`pi-maestro-flow@0.35.0` requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin). Package installation does not imply model inference validation.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

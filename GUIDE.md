@@ -44,8 +44,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ### Install pi-maestro-flow
 
-> **v0.34.1:** fixes compaction preflight host-module loading. Verification was
-> skipped at the user's request; other package versions are unchanged.
+> **v0.35.0 — Remote Refine Mirror & Runtime Fixes:** Flow 0.35.0,
+> Teammate 2.10.1, Cockpit 0.24.5; other packages unchanged. Optional Refine
+> mirroring retains local TUI authority; Plan draft commit controls the applied
+> terminal. Tool-schema compatibility, native Bun host IPC, ChatGPT/Codex quota
+> separation and Flow Git polling are also fixed. See the
+> [changelog](docs-site/src/content/docs/guides/changelog.en.md).
 
 > **v0.34.0 baseline:** Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0,
 > Cockpit 0.24.4; other packages unchanged. The engine remains `maestro-flow >=0.5.91`
@@ -55,7 +59,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 
 # Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
@@ -885,7 +889,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 pi list
 
 # ─── Knowledge ───

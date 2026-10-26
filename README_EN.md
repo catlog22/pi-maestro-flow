@@ -69,7 +69,7 @@ teammate({
 
 pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regular npm dependency). A single command installs the whole suite: Flow acts as the install entry and automatically pulls in and registers the remaining extensions and dependencies.
 
-> **v0.34.1:** fixes Pi host loading for compaction preflight in managed installations and virtual modules. Only Flow changes; verification was skipped at the user's request. See [RELEASE.md](RELEASE.md).
+> **v0.35.0 — Remote Refine Mirror & Runtime Fixes:** Flow 0.35.0, Teammate 2.10.1, Cockpit 0.24.5; other packages unchanged. Optional Refine mirroring keeps local TUI authority and reports applied only after the Plan draft commits. Also fixes tool-schema compatibility, native Bun host IPC, ChatGPT/Codex quota separation, and Flow Git polling. See the [changelog](docs-site/src/content/docs/guides/changelog.en.md) and [RELEASE.md](RELEASE.md).
 
 > **v0.34.0 baseline:** browser WebM recording/presentation, compaction summary optimization/progress, Teammate routing and Monitor lifecycle subscriptions, Cockpit viewport/terminal stability, and bounded retries/output. Suite: Flow 0.34.0, Backends 0.1.7, Teammate 2.10.0, Cockpit 0.24.4; all other packages unchanged. The engine remains `maestro-flow >=0.5.91`; latest upstream/local version is 0.5.92, not an exact pin. Recording requires FFmpeg with VP8/WebM support; video artifacts survive tab closure. See [RELEASE.md](RELEASE.md) for the four `@dyw1234` forks, licensing, and verification scope. Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified. No cross-platform or whole-graph vulnerability-free claim is made.
 
@@ -77,7 +77,7 @@ pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regul
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.34.1                              # install or upgrade the plugin (single entry)
+pi install npm:pi-maestro-flow@0.35.0                              # install or upgrade the plugin (single entry)
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 
@@ -120,7 +120,7 @@ Full tool parameters and workflow definitions live in the **[Usage Guide](docs/U
 | **[Usage Guide](docs/USAGE_EN.md)** / **[中文](docs/USAGE.md)** | Complete feature documentation — all tools, MCP, permissions, thinking depth, agents, workflows |
 | **[User Guide](GUIDE.md)** | In-depth tutorial with examples for every subsystem |
 | **[Smart Search Provider Config](docs/smart-search-provider-config.md)** | Search provider setup — dual-path architecture, API keys, credential syntax, TUI config, sync |
-| **[Release Notes](RELEASE.md)** | v0.34.1: compaction preflight host-loading fix |
+| **[Release Notes](RELEASE.md)** | v0.35.0: remote Refine mirror, host IPC, quota and Git polling fixes |
 | **[Browser Bridge Setup](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)** | Multiple listeners, NONE/paired auth, explicit channels, shared login state, and troubleshooting |
 | Per-plugin READMEs | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 

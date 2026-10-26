@@ -59,13 +59,13 @@
 
 ### 安装
 
-> **v0.34.1：** 修复压缩预检的宿主模块加载；仅 Flow 升级，其他包不变。按用户要求跳过本版验证，见 [RELEASE.md](../RELEASE.md)。
+> **v0.35.0 — Refine 远程镜像与运行时修复：** Flow 0.35.0、Teammate 2.10.1、Cockpit 0.24.5；其他包不变。可选 Refine 镜像保留本地 TUI 权威，Plan 草稿提交后才报告 applied；另含工具 schema 兼容、原生 Bun 宿主 IPC、ChatGPT/Codex 配额隔离及 Flow Git 轮询修复。见[更新日志](../docs-site/src/content/docs/guides/changelog.md)与 [RELEASE.md](../RELEASE.md)。
 
 > **v0.34.0 基线：** Flow 0.34.0、Backends 0.1.7、Teammate 2.10.0、Cockpit 0.24.4，其余包不变；引擎仍为 `maestro-flow >=0.5.91`（上游最新/本地 0.5.92，非精确 pin）。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
@@ -86,7 +86,7 @@ Pi 0.99+ 由宿主管理工具 loadout、`tool_search`、模型/classifier、MCP
 
 - `search` 替代 `ffgrep`：支持 literal/regex/fuzzy 与 lines/files/count；索引不可用及工作区根目录 plain/regex 搜索可走有界 `rg`，fuzzy 仍需索引。大项目应限定 path/glob。
 - `open-code-review` 需要单独安装 `ocr` CLI。`preview`/`rules` 只解析文件与规则，`review` 使用运行时模型执行 OCR 管理的评审；`health` 检查连通性。模型配置入口为 `/api-manager open-code-review`，安装说明见 `packages/pi-maestro-flow/optional/OCR-SETUP.md`。
-- 可选 Ask transport 与本地 TUI 竞速并取消另一端；Mobile 取消也会关闭本地向导。Plan confirm/review 暴露可选 transport seam 和 revision 检查，不代表所有客户端都已实现 Plan UI。
+- 可选 Ask transport 与本地 TUI 竞速并取消另一端；Mobile 取消也会关闭本地向导。Plan confirm/review 暴露可选 transport seam 和 revision 检查，不代表所有客户端都已实现 Plan UI。v0.35.0 的 Refine transport 则只镜像本地面板并回传操作意图，不另开子代理；本地 TUI 保持权威，镜像失败不关闭本地界面。优化草稿须经 PlanStore 提交后才报告 `applied`，评审反馈仍进入讨论，不等于草稿已应用或 Plan 已批准。
 - 原生 Quiet 模式支持 live 切换且不额外激活工具；首次恢复历史渲染和第三方 execution-only override 仍有边界，详见文档站 [Cockpit](../docs-site/src/content/docs/guides/cockpit.md)。
 
 ### 插件注册的工具总览
@@ -1363,7 +1363,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.34.1
+pi install npm:pi-maestro-flow@0.35.0
 
 # ─── 知识 ───
 maestro search "查询" --code
