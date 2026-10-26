@@ -189,6 +189,7 @@ import type { TodoItem as CockpitTodoItem } from "pi-cockpit/src/types.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
 import { KnowledgeCliAdapter, resolveLatestSessionId } from "../knowledge/cli-adapter.ts";
+import { completedKnowledgeSessions, createKnowledgeCloseoutRequester, stagedKnowledgeCloseoutTarget } from "../knowledge/closeout.ts";
 import { stageWindowKnowledgeCandidate } from "../knowledge/extractor.ts";
 import { SkillCliAdapter, type SkillCliListOptions } from "../skills/skill-cli-adapter.ts";
 import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge/view-model.ts";
@@ -1524,6 +1525,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
    * tool_execution_end; consumed by the next refreshWorkflow to fire the
    * knowledge pipeline (session/3.0 has no Execution-seal transition). */
   let pendingV3CompleteReceipts: V3CompleteReceipt[] = [];
+  const requestKnowledgeCloseout = createKnowledgeCloseoutRequester(pi);
 
   // Knowledge-pending UI indicator: persistent status-bar segment + 0→N
   // notify so manual resolve (review_required) is surfaced without opening
@@ -1552,8 +1554,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       if (lastKnowledgePendingNotify !== key) {
         lastKnowledgePendingNotify = key;
         ctx.ui.notify(
-          `Knowledge center: ${counts.reviewRequired} candidate(s) need manual resolve`
-            + ` (${counts.pending} pending total) — /maestro-knowledge`,
+          `Knowledge: ${counts.reviewRequired} candidate(s) need a human decision`
+            + ` (${counts.pending} pending total). The completion owner presents candidates in Ask.`,
           "info",
         );
       }
@@ -1581,6 +1583,25 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       // Ignore — next seal/refresh will retry.
     }
   }
+  async function closeoutSessionKnowledge(ctx: ExtensionContext, sessionId: string, sealedBy: string): Promise<void> {
+    let summary;
+    try {
+      summary = await new KnowledgeCliAdapter(ctx.cwd).review(sessionId);
+    } catch (error) {
+      ctx.ui.notify(`${sealedBy} — knowledge review unavailable: ${publicWorkflowErrorMessage(error)}. Backlog retained.`, "warning");
+      return;
+    }
+    const pending = summary.candidates.filter(candidate => candidate.status === "pending");
+    const reviewRequired = pending.filter(candidate => candidate.reconciliation?.promotion_eligibility === "review_required").length;
+    updateKnowledgePendingStatus(ctx, { pending: pending.length, reviewRequired });
+    ctx.ui.notify(`${sealedBy} — ${pending.length} candidate(s) pending, ${reviewRequired} need human review.`, "info");
+    requestKnowledgeCloseout(ctx, [{
+      sessionId,
+      candidateIds: pending.filter(candidate => candidate.reconciliation?.promotion_eligibility !== "suppressed")
+        .map(candidate => candidate.candidate_id),
+    }]);
+  }
+
   let lastSessionStatus: string | undefined;
   let lastWorkflowLifecycleSnapshot: WorkflowSnapshot | undefined;
   let workflowSessionOptedIn = true;
@@ -2485,29 +2506,15 @@ When NOT to use:
     // and `run complete --advance` (operation session-complete /
     // run-complete-and-seal) arrive as tool_execution_end receipts and seal
     // the knowledge pipeline exactly like the legacy execution-seal projection.
-    const v3CompleteReceipt = pendingV3CompleteReceipts.length > 0 ? pendingV3CompleteReceipts.splice(0).pop() : undefined;
-    if (sealedExecution || v3CompleteReceipt) {
-      const sealedSessionId = v3CompleteReceipt?.sessionId
-        ?? sealedExecution?.sessionId
-        ?? nextSession?.sessionId;
-      if (sealedSessionId) {
-        const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedSessionId).catch(() => null);
-        const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
-        const reviewRequired = summary?.candidates.filter(
-          candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
-        ).length ?? 0;
-        updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
-        const sealedBy = v3CompleteReceipt
-          ? `Session ${sealedSessionId} sealed by v3 ${v3CompleteReceipt.operation}`
-            + (v3CompleteReceipt.runId ? ` (run ${v3CompleteReceipt.runId})` : "")
-          : `Workflow Execution ${sealedExecution!.executionId} sealed in Session ${sealedSessionId}`;
-        const message = pending > 0 || reviewRequired > 0
-          ? `${sealedBy} — ${pending} candidate(s) pending, ${reviewRequired} review required. `
-            + `Run "maestro knowledge review ${sealedSessionId}" before promotion.`
-          : `${sealedBy}.`;
-        ctx.ui.notify(message, "info");
-        pi.sendMessage({ customType: "execution-knowledge", content: message, display: true });
-      }
+    // Intermediate Runs only stage/report; the terminal Session owns the Ask.
+    const completedSessionIds = completedKnowledgeSessions(
+      pendingV3CompleteReceipts.splice(0), sealedExecution?.sessionId, next.session?.sessionId,
+    );
+    for (const sessionId of completedSessionIds) {
+      const sealedBy = sealedExecution?.sessionId === sessionId
+        ? `Workflow Execution ${sealedExecution.executionId} sealed in Session ${sessionId}`
+        : `Workflow Session ${sessionId} completed`;
+      await closeoutSessionKnowledge(ctx, sessionId, sealedBy);
     }
     // Session sealed notification: legacy session/1.x keeps its persisted sealed
     // status; session/3.0 maps `session complete` receipts to the same sealed
@@ -2519,20 +2526,11 @@ When NOT to use:
       if (nextSession.status === "sealed" && lastSessionStatus !== undefined) {
         const sealedSessionId = nextSession.sessionId;
         const v3Session = nextSession.schemaVersion === "session/3.0";
-        const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedSessionId).catch(() => null);
-        const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
-        const reviewRequired = summary?.candidates.filter(
-          candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
-        ).length ?? 0;
-        updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
-        if (pending > 0 || reviewRequired > 0) {
+        if (!completedSessionIds.includes(sealedSessionId)) {
           const sealedBy = v3Session
             ? `Workflow Session ${sealedSessionId} completed (v3 session complete)`
             : `Workflow Session ${sealedSessionId} sealed (legacy session/1.x)`;
-          const message = `${sealedBy} — ${pending} candidate(s) pending, `
-            + `${reviewRequired} review required. Run \"maestro knowledge review ${sealedSessionId}\" before promotion.`;
-          ctx.ui.notify(message, "info");
-          pi.sendMessage({ customType: "session-knowledge", content: message, display: true });
+          await closeoutSessionKnowledge(ctx, sealedSessionId, sealedBy);
         }
       }
       lastSessionStatus = nextSession.status;
@@ -2860,8 +2858,8 @@ When NOT to use:
               reviewRequired,
             });
             const reviewHint = reviewRequired > 0
-              ? ` · ${reviewRequired} review required — \"maestro knowledge review ${sealedSessionId}\"`
-              : ` — \"maestro knowledge review ${sealedSessionId}\"`;
+              ? ` · ${reviewRequired} need human review at owner closeout (Ask)`
+              : " · pending candidates are reviewed in Ask at owner closeout";
             pi.sendMessage({
               customType: "run-knowledge",
               content: `Run ${run.runId}/${run.command} sealed — knowledge: consumed ${signals.consumed} · `
@@ -4282,6 +4280,12 @@ When NOT to use:
       );
       if (!event.isError && knowledgeSessionId) await refreshKnowledgePendingStatus(ctx, knowledgeSessionId);
       else publishMaestroUi();
+      if (!event.isError && /\bmaestro\s+knowledge\s+stage\b/.test(command)) {
+        const result: FlowToolResult = event.result;
+        const output = result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+        const target = stagedKnowledgeCloseoutTarget(output);
+        if (target) requestKnowledgeCloseout(ctx, [target]);
+      }
     }
     // Session/Run lifecycle writes (run/session/execution/artifact/ralph) refresh
     // the canonical Workflow snapshot. The v3 surface (run next/complete,
@@ -4300,7 +4304,7 @@ When NOT to use:
         ? Boolean(runControlArgv.length && !isRunControlReadArgv(runControlArgv))
         : isWorkflowOptInCommand(command);
       const completeReceipt = v3CompleteReceipt(command, runControlArgv);
-      if (completeReceipt && workflowBridge) pendingV3CompleteReceipts.push(completeReceipt);
+      if (!event.isError && completeReceipt && workflowBridge) pendingV3CompleteReceipts.push(completeReceipt);
       await refreshWorkflow(ctx, true, allowOptIn, allowOptIn);
     }
   });

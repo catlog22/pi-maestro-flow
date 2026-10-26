@@ -31,12 +31,13 @@ async function harness(config: Partial<SelfEvolveConfig> = {}) {
   let command: any;
   let sessionId = "session-one";
   const notifications: string[] = [];
-  const ctx: any = { cwd: root, sessionManager: { getSessionId: () => sessionId }, model: { provider: "test", id: "model" }, modelRegistry: { getAvailable: () => [{ provider: "test", id: "model" }] }, ui: { notify: (text: string) => notifications.push(text), setStatus() {} } };
-  const pi: any = { on: (name: string, fn: Function) => handlers.set(name, fn), registerCommand: (_name: string, def: any) => command = def.handler };
+  const sent: Array<{ message: { content: string }; options: unknown }> = [];
+  const ctx: any = { hasUI: true, cwd: root, sessionManager: { getSessionId: () => sessionId }, model: { provider: "test", id: "model" }, modelRegistry: { getAvailable: () => [{ provider: "test", id: "model" }] }, ui: { notify: (text: string) => notifications.push(text), setStatus() {} } };
+  const pi: any = { on: (name: string, fn: Function) => handlers.set(name, fn), registerCommand: (_name: string, def: any) => command = def.handler, sendMessage: (message: { content: string }, options: unknown) => sent.push({ message, options }) };
   registerSelfEvolve(pi);
   handlers.get("session_start")!({}, ctx);
   await command("status", ctx); // waits for config loading
-  return { root, output, ctx, handlers, notifications, command,
+  return { root, output, ctx, handlers, notifications, sent, command,
     replaceSession() { sessionId = "session-two"; handlers.get("session_start")!({}, ctx); },
     turn(text: string) { return handlers.get("agent_end")!({ messages: [{ role: "assistant", content: [{ type: "text", text }] }] }, ctx); },
     evidenceTurn(text: string) { return handlers.get("agent_end")!({ messages: [{ role: "toolResult", toolCallId: text, toolName: "read", content: [{ type: "text", text }] }, { role: "assistant", content: [{ type: "text", text }] }] }, ctx); },
@@ -465,7 +466,7 @@ for (const variant of ["existing evidence", "rescued unknown", "legacy summary",
       assert.ok(content.startsWith(`# ${title}\n`));
       assert.ok(content.includes(payload));
       assert.doesNotMatch(content, /tool_trajectory:|<SOP title|<kebab-case-topic>/);
-      return { exitCode: 0, stdout: '{"candidate_id":"KDC-semantic-payload"}', stderr: "" };
+      return { exitCode: 0, stdout: '{"session_id":"ksyn-canonical","candidate_id":"KDC-semantic-payload"}', stderr: "" };
     });
     await h.command("review 1", h.ctx);
     assert.equal(stages, 1, JSON.stringify(h.notifications));
@@ -476,8 +477,17 @@ for (const variant of ["existing evidence", "rescued unknown", "legacy summary",
     assert.ok(deposit.command.includes(stagedContentFile), "audit must record the actual content file");
     assert.deepEqual(deposit.argv, stagedArgs, "audit retains argument boundaries and shell metacharacters");
     assert.equal(deposit.stagedId, "KDC-semantic-payload");
+    assert.equal(h.sent.length, 1, "successful run-less deposit starts owner Ask closeout before shutdown");
+    assert.deepEqual(h.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
+    assert.match(h.sent[0].message.content, /"sessionId":"ksyn-canonical"/);
+    assert.match(h.sent[0].message.content, /"candidateIds":\["KDC-semantic-payload"\]/);
+    assert.match(h.sent[0].message.content, /ask-user-question/);
+    assert.ok(!h.sent[0].message.content.includes(raw.sessionId), "chat provenance cannot select Workflow authority");
     await h.command("review 1", h.ctx);
     assert.equal(stages, 1, "semantic candidates retain deposit idempotency");
+    assert.equal(h.sent.length, 1, "unchanged candidates do not repeat the Ask");
+    h.handlers.get("session_shutdown")!({ type: "session_shutdown", reason: "quit" }, h.ctx);
+    assert.equal(h.sent.length, 1, "shutdown never starts interaction");
   } finally { await h.close(); }
 });
 

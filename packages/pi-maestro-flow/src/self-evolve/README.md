@@ -75,7 +75,7 @@
 
 ## Auto-deposit 模式（Phase 2B）
 
-`mode=auto-deposit` 时，`/self-evolve review [N]` 在评审门之后多一步：**verdict=stage 且过门的信号自动执行 `maestro knowledge stage`**（写入点复用显式 CLI 护栏，不经扩展直写），候选进入知识库 **pending 池**。**永不自动 promote**（治理纪律：promotion 仍需用户请求或 confirmed governance step）。
+`mode=auto-deposit` 时，`/self-evolve review [N]` 在评审门之后多一步：**verdict=stage 且过门的信号自动执行 `maestro knowledge stage`**（写入点复用显式 CLI 护栏，不经扩展直写），候选进入知识库 **pending 池**。可交互的 run-less owner 随即触发 Ask 收尾；Run 候选由终局 owner 收尾，shutdown 不启动交互。**Ask 就是人工评审**，代理内部读取候选，不让用户去 CLI review；按共享 `~/.maestro/ref/knowledge-closeout.md` 一次明确收集处置及发布决定。**永不自动 promote**，只有具体动作获人工授权后才执行。
 
 **模式切换（显式，默认仍 `dry-run`）**：
 

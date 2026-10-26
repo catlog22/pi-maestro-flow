@@ -75,6 +75,48 @@ function createChineseHarness(entries: ChineseEntry[], cwd: string, homeDir: str
   return { commands, sessionStartHandlers, beforeAgentStartHandlers, notifications, ctx, mode };
 }
 
+test("knowledge stage tool completion schedules owner Ask only for successful run-less receipts", async () => {
+  const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
+  const sent: Array<{ content: string; options: unknown }> = [];
+  const api = new Proxy({} as ExtensionAPI, {
+    get(_target, property) {
+      if (property === "on") return (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+        const list = handlers.get(name) ?? [];
+        list.push(handler);
+        handlers.set(name, list);
+      };
+      if (property === "events") return { on() {}, emit() {} };
+      if (property === "sendMessage") return (message: { content: string }, options: unknown) => sent.push({ content: message.content, options });
+      if (property === "getAllTools" || property === "getActiveTools") return () => [];
+      if (property === "getFlag") return () => undefined;
+      return () => undefined;
+    },
+  });
+  registerRootMaestroExtension(api);
+  const ctx = {
+    hasUI: true,
+    cwd: process.cwd(),
+    sessionManager: { getSessionId: () => "pi-chat", getBranch: () => [] },
+    ui: { notify() {}, setStatus() {} },
+  } as unknown as ExtensionContext;
+  const complete = async (receipt: string, isError = false) => {
+    const event = { toolName: "bash", input: { command: "maestro knowledge stage knowhow title --content-file body.md --json" }, isError,
+      result: { content: [{ type: "text", text: receipt }] } };
+    for (const handler of handlers.get("tool_execution_end") ?? []) await handler(event, ctx);
+  };
+  await complete('{"session_id":"ksyn-stage","candidate_id":"KDC-stage"}', true);
+  await complete('{"session_id":"workflow","run_id":"run-1","candidate_id":"KDC-run"}');
+  assert.equal(sent.length, 0);
+  await complete('{"session_id":"ksyn-stage","candidate_id":"KDC-stage"}');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].options, { deliverAs: "followUp", triggerTurn: true });
+  assert.match(sent[0].content, /ask-user-question/);
+  assert.match(sent[0].content, /"sessionId":"ksyn-stage"/);
+  assert.doesNotMatch(sent[0].content, /pi-chat/);
+  await complete('{"session_id":"ksyn-stage","candidate_id":"KDC-stage"}');
+  assert.equal(sent.length, 1);
+});
+
 function registerRootMaestroExtension(api: ExtensionAPI): void {
   const previous = process.env.PI_TEAMMATE_CHILD;
   delete process.env.PI_TEAMMATE_CHILD;

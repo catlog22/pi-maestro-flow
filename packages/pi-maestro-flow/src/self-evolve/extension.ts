@@ -20,8 +20,8 @@
  *      are automatically staged via the explicit `maestro knowledge stage`
  *      CLI (cross-spawn, bounded output, process-tree termination on timeout),
  *      with a full audit ledger under `~/.maestro/self-evolve/deposits/`.
- *      Promotion stays manual (governance discipline) — auto-deposit only
- *      creates pending candidates.
+ *      Auto-deposit only creates pending candidates; the owner presents them
+ *      in Ask and executes publication only with explicit human approval.
  */
 
 import { copyFile, access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -34,6 +34,7 @@ import type {
   SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { serializeTranscriptTail } from "../advisor/runtime.ts";
+import { createKnowledgeCloseoutRequester, stagedKnowledgeCloseoutTarget, type KnowledgeCloseoutTarget } from "../knowledge/closeout.ts";
 import { evaluateDecisionPolicy } from "../decision-policy/service.ts";
 import { decisionPolicyPath } from "../decision-policy/config.ts";
 import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
@@ -479,6 +480,7 @@ export function setSelfEvolvePolicyEvaluatorForTest(evaluate?: typeof evaluateDe
 }
 
 export default function registerSelfEvolve(pi: ExtensionAPI): void {
+  const requestKnowledgeCloseout = createKnowledgeCloseoutRequester(pi);
   let config: SelfEvolveConfig = { ...DEFAULT_SELF_EVOLVE_CONFIG };
   const state = createSelfEvolveRuntimeState();
   // Env flag force-override; takes precedence over the config file.
@@ -1328,7 +1330,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   async function depositSignal(
     signal: SelfEvolveSignal,
     ctx: ExtensionContext,
-  ): Promise<{ path: string; exitCode: number } | undefined> {
+  ): Promise<{ path: string; exitCode: number; closeout?: KnowledgeCloseoutTarget } | undefined> {
     return depositResolvedSignal(signal as ResolvedSignal, ctx);
   }
 
@@ -1340,7 +1342,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   async function depositResolvedSignal(
     signal: ResolvedSignal,
     ctx: ExtensionContext,
-  ): Promise<{ path: string; exitCode: number } | undefined> {
+  ): Promise<{ path: string; exitCode: number; closeout?: KnowledgeCloseoutTarget } | undefined> {
     // Idempotency: never re-stage a signal that already deposited successfully.
     if ((await seedDepositedSignalIds()).has(signal.id)) return undefined;
     if (!isValidSignalId(signal.id)) {
@@ -1403,7 +1405,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     const record = buildDepositRecord(signal, ctx, { exitCode, stdout, stderr, error, args: execArgs });
     const path = await writeDeposit(record, ctx);
     if (exitCode === 0) (await seedDepositedSignalIds()).add(signal.id);
-    return { path, exitCode };
+    return { path, exitCode, closeout: exitCode === 0 ? stagedKnowledgeCloseoutTarget(stdout) : undefined };
   }
 
   /** Build the deposit audit record for one attempt (all outcomes). */
@@ -1738,7 +1740,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         updateStatusBar(ctx);
         ctx.ui.notify(
           config.mode === "auto-deposit"
-            ? "Self-evolve enabled (auto-deposit): review gate-passing candidates are auto-staged into the pending pool — promotion stays manual."
+            ? "Self-evolve enabled (auto-deposit): gate-passing candidates are auto-staged into pending; the owner uses Ask for human review and publication decisions."
             : "Self-evolve enabled: dry-run candidate signals only — nothing is staged or promoted automatically.",
           "info",
         );
@@ -2059,12 +2061,13 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             signalIds: reviewSignals.map((s) => s.id),
           };
           // Phase 2B auto-deposit: in auto-deposit mode, stage every signal
-          // that survived the review gate (`stage` verdict). Promotion stays
-          // manual — auto-deposit only creates pending candidates. Cross-project
+          // that survived the review gate (`stage` verdict). Ask collects human
+          // publication decisions; staging never authorizes them. Cross-project
           // signals (from the global suggestions dir) are never deposited into
           // the current project's knowledge base; already-deposited signals are
           // skipped (idempotent).
           const depositedPaths: string[] = [];
+          const closeoutTargets: KnowledgeCloseoutTarget[] = [];
           let depositAttempts = 0;
           let depositedCount = 0;
           if (config.mode === "auto-deposit") {
@@ -2082,6 +2085,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
                   if (result.exitCode === 0) {
                     depositedPaths.push(result.path);
                     depositedCount += 1;
+                    if (result.closeout && !signal.runId) closeoutTargets.push(result.closeout);
                   }
                 }
               } catch (error) {
@@ -2105,6 +2109,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             `${formatReviewSummary(review)}${gateNote ? `\n  gate: ${gateNote}` : ""}${depositNote}\n  → saved: ${path}`,
             "info",
           );
+          // A Run worker returns IDs; only run-less owner work asks immediately.
+          requestKnowledgeCloseout(ctx, closeoutTargets);
         } catch (error) {
           ctx.ui.notify(
             `Self-evolve review failed: ${error instanceof Error ? error.message : String(error)}`,
