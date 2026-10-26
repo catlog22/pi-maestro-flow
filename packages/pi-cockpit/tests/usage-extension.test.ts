@@ -112,6 +112,10 @@ function createHarness(options: { usageFlag?: boolean; setPollIntervalMs?: (ms: 
 			return name === "usage" && options.usageFlag === true;
 		},
 		events: {
+			on(name: string, handler: (event: unknown) => unknown) {
+				handlers.set(name, handler);
+				return () => { handlers.delete(name); };
+			},
 			emit(name: string, data: unknown) {
 				emitted.push({ name, data });
 			},
@@ -201,6 +205,63 @@ afterEach(() => {
 });
 
 describe("usage-bars subsystem lifecycle", () => {
+	it("reports official ChatGPT usage without probing Codex endpoints", async () => {
+		const harness = createHarness({ usageFlag: true });
+		const mock = createContext("print", "openai", {
+			configured: true, source: "OAuth", token: "direct-token",
+		});
+		let requests = 0;
+		globalThis.fetch = async () => { requests += 1; throw new Error("unexpected quota request"); };
+		const lines: string[] = [];
+		const originalLog = console.log;
+		console.log = (line?: unknown) => { lines.push(String(line)); };
+		try {
+			await harness.subsystem.start(mock.context);
+		} finally {
+			console.log = originalLog;
+			harness.subsystem.dispose();
+		}
+		const result = JSON.parse(lines[0]!);
+		assert.equal(result.provider, "chatgpt");
+		assert.equal(result.status, "ok");
+		assert.equal(result.quotaHidden, true);
+		assert.match(result.notice, /chatgpt.com\/settings\/usage/);
+		assert.equal(requests, 0);
+	});
+
+	it("does not treat OpenAI API keys as ChatGPT subscription credentials", async () => {
+		const harness = createHarness();
+		const mock = createContext("tui", "openai", {
+			configured: true, source: "OPENAI_API_KEY", token: "sk-api-key",
+		});
+		try {
+			await harness.subsystem.start(mock.context);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(harness.subsystem.getStatus(mock.context.ui.theme, 5), undefined);
+		} finally {
+			harness.subsystem.dispose();
+		}
+	});
+
+	it("clears usage and resolves credentials again after an account switch", async () => {
+		const harness = createHarness();
+		const mock = createContext("tui", "openai", {
+			configured: true, source: "OAuth", token: "direct-token",
+		});
+		try {
+			await harness.subsystem.start(mock.context);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.match(harness.subsystem.getStatus(mock.context.ui.theme, 5) ?? "", /ChatGPT \(official\)/);
+			const before = mock.authCalls();
+			await harness.handlers.get("pi:account-changed")!({ providerId: "openai" }, mock.context);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.ok(mock.authCalls() > before);
+		} finally {
+			harness.subsystem.dispose();
+		}
+		assert.equal(harness.handlers.has("pi:account-changed"), false);
+	});
+
 	it("prints one-line JSON and shuts down for --usage", async () => {
 		const harness = createHarness({ usageFlag: true });
 		const mock = createContext("print", "google");

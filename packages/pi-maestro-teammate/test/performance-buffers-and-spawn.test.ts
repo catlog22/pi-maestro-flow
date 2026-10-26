@@ -52,6 +52,7 @@ import type {
   Usage,
 } from "../src/shared/types.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
+import { OBSERVATION_TEXT_MAX_BYTES } from "../src/public/v1/observation.ts";
 
 const baseAgentConfig: AgentConfig = {
   name: "general",
@@ -417,7 +418,7 @@ test("sleeping agent history has byte and count bounds while watch retains last 
     timestamp: index,
   }));
   agent.outputLog = Array.from({ length: 250 }, (_, index) => `line-${index}-${"界".repeat(10_000)}`);
-  agent.lastResult = `final-${"界".repeat(200_000)}`;
+  agent.lastResult = `final-${"界".repeat(200_000)}\nretained result sentinel`;
 
   retainBoundedAgentHistory(agent, true);
 
@@ -432,9 +433,18 @@ test("sleeping agent history has byte and count bounds while watch retains last 
       <= AGENT_BUFFER_LIMITS.logBytes,
   );
   assert.ok(Buffer.byteLength(agent.lastResult ?? "") <= AGENT_BUFFER_LIMITS.lastResultBytes);
+  const retainedResult = agent.lastResult;
   const watch = buildWatchOutput({ kind: "agent", agent }, 20).join("\n");
-  assert.match(watch, /last result/);
+  assert.ok(Buffer.byteLength(watch) <= OBSERVATION_TEXT_MAX_BYTES);
+  assert.match(watch, /observation text truncated; canonical result unchanged/);
   assert.match(watch, /sleeping/);
+  assert.equal(agent.lastResult, retainedResult, "display truncation must not alter the retained result");
+
+  // A narrower view leaves room for the result instead of exhausting the display budget on activity.
+  const narrowWatch = buildWatchOutput({ kind: "agent", agent }, 1).join("\n");
+  assert.match(narrowWatch, /--- last result ---\nretained result sentinel/);
+  assert.ok(Buffer.byteLength(narrowWatch) <= OBSERVATION_TEXT_MAX_BYTES);
+  assert.equal(agent.lastResult, retainedResult);
 });
 
 test("agent history compacts sparse output logs without throwing", () => {
@@ -609,6 +619,60 @@ test("Pi launcher resolution is ordered, shell-free, and rejects a Gateway argv 
   assert.equal(gateway.source, "path-fallback");
   assert.equal(gateway.command, "pi");
   assert.deepEqual(gateway.argsPrefix, []);
+});
+
+test("compiled Pi and pi-bolt hosts launch themselves before consulting PATH or JS entries", () => {
+  for (const [platform, execPath] of [
+    ["win32", "C:/pi-bolt/pi-bolt.exe"],
+    ["win32", "C:/pi/pi.exe"],
+    ["linux", "/opt/pi-bolt/pi-bolt"],
+    ["darwin", "/opt/pi/pi"],
+  ] as const) {
+    const options = {
+      envBinary: null,
+      platform,
+      execPath,
+      bunVersion: "1.4.3",
+      pathValue: "C:/shim",
+      argv: [execPath, "/$bunfs/root/cli.js"],
+      isFile: (candidate: string) => candidate === execPath,
+      readTextFile: () => { throw new Error("compiled host must not read JS entries or shims"); },
+    };
+    const spec = getPiSpawnCommand(["--mode", "rpc"], options);
+    assert.deepEqual(spec, {
+      command: execPath,
+      argsPrefix: [],
+      source: "host-native",
+      args: ["--mode", "rpc"],
+      shell: false,
+    });
+    assert.deepEqual(resolvePiLaunchSpec({ ...options, envBinary: "C:/configured/pi-custom.exe" }), {
+      command: "C:/configured/pi-custom.exe",
+      argsPrefix: [],
+      source: "override",
+    });
+  }
+});
+
+test("native host detection excludes Node, generic Bun, Gateways and missing executables", () => {
+  for (const [execPath, bunVersion, exists] of [
+    ["C:/pi-bolt/pi-bolt.exe", null, true],
+    ["C:/bun/bun.exe", "1.4.3", true],
+    ["C:/node/node.exe", "1.4.3", true],
+    ["C:/gateway/pi-maestro-gateway.exe", "1.4.3", true],
+    ["C:/pi-bolt/pi-bolt.exe", "1.4.3", false],
+  ] as const) {
+    assert.deepEqual(resolvePiLaunchSpec({
+      envBinary: null,
+      platform: "win32",
+      execPath,
+      bunVersion,
+      entryPoint: null,
+      pathValue: null,
+      appData: null,
+      isFile: (candidate) => exists && candidate === execPath,
+    }), { command: "pi", argsPrefix: [], source: "path-fallback" });
+  }
 });
 
 test("verified host Pi entry is accepted only through its package bin declaration", () => {

@@ -173,6 +173,7 @@ describe("formatting and parsing", () => {
 
 describe("current Pi provider compatibility", () => {
 	it("detects supported current providers", () => {
+		expect(detectProvider({ provider: "openai" })).toBe("chatgpt");
 		expect(detectProvider({ provider: "openai-codex" })).toBe("codex");
 		expect(detectProvider({ provider: "anthropic" })).toBe("claude");
 		expect(detectProvider({ provider: "zai" })).toBe("zai");
@@ -189,6 +190,7 @@ describe("current Pi provider compatibility", () => {
 	});
 
 	it("maps usage keys to Pi provider IDs", () => {
+		expect(providerToPiProviderId("chatgpt")).toBe("openai");
 		expect(providerToPiProviderId("codex")).toBe("openai-codex");
 		expect(providerToPiProviderId("claude")).toBe("anthropic");
 		expect(providerToPiProviderId("zai-cn")).toBe("zai-coding-cn");
@@ -233,6 +235,23 @@ describe("current Pi provider compatibility", () => {
 });
 
 describe("provider fetchers", () => {
+	it("keeps official ChatGPT quota separate from Codex without sending its token to WHAM", async () => {
+		let requests = 0;
+		const results = await fetchAllUsages({ chatgpt: "direct-token", codex: "codex-token" }, {
+			fetchFn: async (url, init) => {
+				requests += 1;
+				assert.equal(url, "https://chatgpt.com/backend-api/wham/usage");
+				assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer codex-token");
+				return jsonResponse(200, { rate_limit: { primary_window: { used_percent: 42 } } });
+			},
+		});
+		assert.equal(requests, 1);
+		assert.equal(results.chatgpt?.quotaHidden, true);
+		assert.match(results.chatgpt?.notice ?? "", /https:\/\/chatgpt.com\/settings\/usage/);
+		assert.equal(results.chatgpt?.error, undefined);
+		assert.equal(results.codex?.session, 42);
+	});
+
 	it("fetches Codex usage and handles HTTP/JSON failures", async () => {
 		const usage = await fetchCodexUsage("token", {
 			fetchFn: async () => jsonResponse(200, {

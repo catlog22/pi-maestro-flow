@@ -70,6 +70,7 @@ test("teammate-session-routing clear drops all session overrides", async () => {
   const cwd = join(root, "project");
   const sessionId = "pi-session-tool-test-002";
   try {
+    const baseline = loadModelRoutingConfig(cwd);
     const tool = createTeammateSessionRoutingTool();
     await tool.execute(
       "call-1",
@@ -79,6 +80,7 @@ test("teammate-session-routing clear drops all session overrides", async () => {
       mockCtx(cwd, sessionId),
     );
     assert.equal(existsSync(getSessionModelRoutingPath(cwd, sessionId)), true);
+    assert.equal(loadModelRoutingConfig(cwd, undefined, sessionId).mappings.review, "maestro-qwen/qwen3.8-max");
 
     const result = await tool.execute(
       "call-2",
@@ -93,10 +95,9 @@ test("teammate-session-routing clear drops all session overrides", async () => {
     // After clear, the session file holds empty rules, so the effective
     // config falls back to the global/project baseline (no session override).
     const cfg = loadModelRoutingConfig(cwd, undefined, sessionId);
-    assert.ok(
-      cfg.mappings.review === undefined || cfg.mappings.review === null,
-      `review should not carry a session override after clear (got ${String(cfg.mappings.review)})`,
-    );
+    assert.deepEqual(cfg.mappings, baseline.mappings);
+    assert.deepEqual(cfg.fallbackMappings, baseline.fallbackMappings);
+    assert.deepEqual(cfg.thinkingLevels, baseline.thinkingLevels);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

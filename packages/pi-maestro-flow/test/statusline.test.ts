@@ -55,6 +55,7 @@ function createHarness(options: {
   branchEntries?: unknown[];
   cwd?: string;
   terminalWidth?: number;
+  hasUI?: boolean;
   exec?: (cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 } = {}) {
   const handlers = new Map<string, EventHandler[]>();
@@ -100,7 +101,7 @@ function createHarness(options: {
   const fakeTheme = makeFakeTheme();
   let ctx = {
     cwd: options.cwd ?? "D:\\pi-maestro-flow",
-    hasUI: true,
+    hasUI: options.hasUI ?? true,
     model: { id: "claude-test" },
     getContextUsage: () => ({ percent: 42 }),
     sessionManager: {
@@ -287,7 +288,7 @@ test("statusline reflows on stable silent terminal width changes using the same 
 });
 
 test("periodic Git refresh redraws only when visible Git content changes", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
   let stdout = "## main...origin/main [ahead 1]\n M tracked.ts\n";
   let execCalls = 0;
   const harness = createHarness({
@@ -322,8 +323,8 @@ test("periodic Git refresh redraws only when visible Git content changes", async
   }
 });
 
-test("statusline rejects initial and periodic Git results from an older Session", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+test("statusline serializes Git requests across Sessions and rejects stale results", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
   const calls: Array<{
     cwd: string;
     resolve(result: { code: number; stdout: string; stderr: string }): void;
@@ -336,28 +337,77 @@ test("statusline rejects initial and periodic Git results from an older Session"
     assert.deepEqual(calls.map((call) => call.cwd), ["D:\\old-session"]);
 
     t.mock.timers.tick(30_000);
-    assert.deepEqual(
-      calls.map((call) => call.cwd),
-      ["D:\\old-session", "D:\\old-session"],
-      "the old Session periodic refresh must be in flight before switching",
-    );
+    assert.equal(calls.length, 1, "periodic ticks must not overlap an in-flight request");
 
     harness.startSession("D:\\new-session");
-    assert.deepEqual(
-      calls.map((call) => call.cwd),
-      ["D:\\old-session", "D:\\old-session", "D:\\new-session"],
-    );
+    assert.equal(calls.length, 1, "the replacement Session must wait for the old request");
+    calls[0]!.resolve({ code: 0, stdout: "## stale-initial\n", stderr: "" });
+    await settleAsyncWork();
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /stale-initial/);
+    assert.deepEqual(calls.map((call) => call.cwd), ["D:\\old-session", "D:\\new-session"]);
 
-    calls[2]!.resolve({ code: 0, stdout: "## new-branch\n", stderr: "" });
+    calls[1]!.resolve({ code: 0, stdout: "## new-branch\n", stderr: "" });
     await settleAsyncWork();
     assert.match(stripAnsi(harness.render(120)[0]), /new-branch/);
 
-    calls[0]!.resolve({ code: 0, stdout: "## stale-initial\n", stderr: "" });
-    calls[1]!.resolve({ code: 0, stdout: "## stale-periodic\n", stderr: "" });
+    t.mock.timers.tick(30_000);
+    assert.equal(calls.length, 3);
+    harness.startSession("D:\\third-session");
+    calls[2]!.resolve({ code: 0, stdout: "## stale-periodic\n", stderr: "" });
     await settleAsyncWork();
-    const rendered = stripAnsi(harness.render(120)[0]);
-    assert.match(rendered, /new-branch/);
-    assert.doesNotMatch(rendered, /stale-initial|stale-periodic/);
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /new-branch|stale-periodic/);
+    t.mock.timers.tick(4_999);
+    assert.equal(calls.length, 3, "a Session switch must preserve the periodic request cooldown");
+    t.mock.timers.tick(1);
+    assert.equal(calls[3]!.cwd, "D:\\third-session");
+    calls[3]!.resolve({ code: 0, stdout: "## third-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /third-branch/);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("rapid Session switches preserve the Git minimum interval before and after settlement", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const calls: Array<{
+    cwd: string;
+    startedAt: number;
+    resolve(result: { code: number; stdout: string; stderr: string }): void;
+  }> = [];
+  const harness = createHarness({
+    cwd: "D:\\first-session",
+    exec: (cwd) => new Promise((resolve) => calls.push({ cwd, startedAt: Date.now(), resolve })),
+  });
+  try {
+    t.mock.timers.tick(100);
+    harness.startSession("D:\\second-session");
+    calls[0]!.resolve({ code: 0, stdout: "## stale-first\n", stderr: "" });
+    await settleAsyncWork();
+    assert.equal(calls.length, 1, "settling the previous request must not bypass the cooldown");
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /stale-first/);
+    t.mock.timers.tick(4_899);
+    assert.equal(calls.length, 1);
+    t.mock.timers.tick(1);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.cwd, "D:\\second-session");
+    assert.equal(calls[1]!.startedAt - calls[0]!.startedAt, 5_000);
+    calls[1]!.resolve({ code: 0, stdout: "## second-branch\n", stderr: "" });
+    await settleAsyncWork();
+
+    t.mock.timers.tick(100);
+    harness.startSession("D:\\third-session");
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /second-branch/);
+    t.mock.timers.tick(4_899);
+    assert.equal(calls.length, 2, "a settled request must retain its cooldown across Sessions");
+    t.mock.timers.tick(1);
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2]!.cwd, "D:\\third-session");
+    assert.equal(calls[2]!.startedAt - calls[1]!.startedAt, 5_000);
+    calls[2]!.resolve({ code: 0, stdout: "## third-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /third-branch/);
   } finally {
     harness.dispose();
     t.mock.timers.reset();
@@ -365,7 +415,7 @@ test("statusline rejects initial and periodic Git results from an older Session"
 });
 
 test("session_tree keeps the replacement footer live and fences the replaced footer Git request", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const calls: Array<{
     cwd: string;
     resolve(result: { code: number; stdout: string; stderr: string }): void;
@@ -378,19 +428,19 @@ test("session_tree keeps the replacement footer live and fences the replaced foo
     await settleAsyncWork();
 
     harness.emitBranchChange();
-    t.mock.timers.tick(500);
+    t.mock.timers.tick(5_000);
     assert.equal(calls.length, 2);
 
     harness.emit("session_tree", { type: "session_tree", oldLeafId: "old", newLeafId: "new" });
     harness.emitBranchChange();
-    t.mock.timers.tick(500);
-    assert.equal(calls.length, 3, "the replacement footer must keep its branch subscription live");
-
-    calls[2]!.resolve({ code: 0, stdout: "## replacement-branch\n", stderr: "" });
-    await settleAsyncWork();
-    assert.match(stripAnsi(harness.render(120)[0]), /replacement-branch/);
+    t.mock.timers.tick(5_000);
+    assert.equal(calls.length, 2, "replacement must not overlap the old footer request");
 
     calls[1]!.resolve({ code: 0, stdout: "## replaced-footer-stale\n", stderr: "" });
+    await settleAsyncWork();
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /replaced-footer-stale/);
+    assert.equal(calls.length, 3, "the replacement footer must refresh after the old request settles");
+    calls[2]!.resolve({ code: 0, stdout: "## replacement-branch\n", stderr: "" });
     await settleAsyncWork();
     const rendered = stripAnsi(harness.render(120)[0]);
     assert.match(rendered, /replacement-branch/);
@@ -401,31 +451,156 @@ test("session_tree keeps the replacement footer live and fences the replaced foo
   }
 });
 
-test("agent and tool completion refresh Git under the active footer generation", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const calls: Array<{
-    resolve(result: { code: number; stdout: string; stderr: string }): void;
-  }> = [];
+test("all tools including write/edit and agent completion leave Git to the periodic refresh", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  let execCalls = 0;
   const harness = createHarness({
-    exec: () => new Promise((resolve) => calls.push({ resolve })),
+    exec: async () => {
+      execCalls++;
+      return { code: 0, stdout: "## main\n", stderr: "" };
+    },
   });
   try {
-    calls[0]!.resolve({ code: 0, stdout: "## initial-branch\n", stderr: "" });
     await settleAsyncWork();
+    for (const toolName of ["read", "search", "fffind", "resource", "todo", "bash", "bash_bg", "custom-tool", "write", "edit"]) {
+      harness.emit("tool_execution_end", { toolName, input: { command: "maestro search git --json" } });
+      harness.emit("agent_end");
+      t.mock.timers.tick(1_000);
+      await settleAsyncWork();
+      assert.equal(execCalls, 1, `${toolName} must not cause a Git query`);
+    }
+    t.mock.timers.tick(20_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 2, "the periodic query still detects file changes");
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
 
-    harness.emit("agent_end", { type: "agent_end" });
-    t.mock.timers.tick(500);
-    assert.equal(calls.length, 2);
-    calls[1]!.resolve({ code: 0, stdout: "## agent-branch\n", stderr: "" });
+test("branch changes refresh Git with a shared minimum interval and a trailing update", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  let execCalls = 0;
+  let stdout = "## main\n";
+  const harness = createHarness({
+    exec: async () => {
+      execCalls++;
+      return { code: 0, stdout, stderr: "" };
+    },
+  });
+  try {
     await settleAsyncWork();
-    assert.match(stripAnsi(harness.render(120)[0]), /agent-branch/);
+    stdout = "## main\n M tracked.ts\n";
+    for (let index = 0; index < 3; index++) {
+      harness.emitBranchChange();
+      t.mock.timers.tick(1_000);
+    }
+    t.mock.timers.tick(1_999);
+    assert.equal(execCalls, 1);
+    t.mock.timers.tick(1);
+    await settleAsyncWork();
+    assert.equal(execCalls, 2, "a burst must coalesce without dropping its trailing update");
+    assert.match(stripAnsi(harness.render(120)[0]), /main.*△/);
 
-    harness.emit("tool_execution_end", { type: "tool_execution_end" });
-    t.mock.timers.tick(500);
-    assert.equal(calls.length, 3);
-    calls[2]!.resolve({ code: 0, stdout: "## tool-branch\n", stderr: "" });
+    t.mock.timers.tick(5_000);
+    stdout = "## edited-branch\n";
+    harness.emitBranchChange();
+    t.mock.timers.tick(499);
+    assert.equal(execCalls, 2);
+    t.mock.timers.tick(1);
     await settleAsyncWork();
-    assert.match(stripAnsi(harness.render(120)[0]), /tool-branch/);
+    assert.equal(execCalls, 3);
+    assert.match(stripAnsi(harness.render(120)[0]), /edited-branch/);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("periodic and event Git refreshes coalesce and queue only one in-flight follow-up", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  const calls: Array<(result: { code: number; stdout: string; stderr: string }) => void> = [];
+  const harness = createHarness({ exec: () => new Promise((resolve) => calls.push(resolve)) });
+  try {
+    calls[0]!({ code: 0, stdout: "## main\n", stderr: "" });
+    await settleAsyncWork();
+    t.mock.timers.tick(29_500);
+    harness.emitBranchChange();
+    t.mock.timers.tick(500);
+    assert.equal(calls.length, 2, "the event and periodic tick must launch one query");
+    for (let index = 0; index < 10; index++) {
+      harness.emitBranchChange();
+    }
+    t.mock.timers.tick(30_000);
+    assert.equal(calls.length, 2, "a slow query must never overlap a later tick or event");
+    calls[1]!({ code: 0, stdout: "## main\n", stderr: "" });
+    await settleAsyncWork();
+    assert.equal(calls.length, 3, "in-flight branch changes require one trailing query");
+    calls[2]!({ code: 0, stdout: "## updated-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /updated-branch/);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("Git refresh is disabled without a UI", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  let execCalls = 0;
+  const harness = createHarness({ hasUI: false, exec: async () => {
+    execCalls++;
+    return { code: 0, stdout: "## main\n", stderr: "" };
+  } });
+  try {
+    harness.emit("tool_execution_end", { toolName: "write" });
+    harness.emit("agent_end");
+    t.mock.timers.tick(60_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 0);
+    assert.equal(harness.footerState().installed, false);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("Cockpit ownership stops pending Git queries and restores polling when released", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  let execCalls = 0;
+  const harness = createHarness({ exec: async () => {
+    execCalls++;
+    return { code: 0, stdout: "## main\n", stderr: "" };
+  } });
+  try {
+    await settleAsyncWork();
+    harness.emitBranchChange();
+    harness.emitExtensionEvent("cockpit:ui-ownership", { footer: true });
+    harness.emit("tool_execution_end", { toolName: "edit" });
+    harness.emit("agent_end");
+    t.mock.timers.tick(60_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 1, "hidden footer must not run Git timers or queued events");
+
+    harness.startSession("D:\\another-session");
+    t.mock.timers.tick(60_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 1, "a new Session must respect Cockpit ownership");
+    harness.emitExtensionEvent("cockpit:ui-ownership", { footer: false });
+    await settleAsyncWork();
+    assert.equal(execCalls, 2);
+    t.mock.timers.tick(30_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 3, "polling must resume when Flow reclaims the footer");
+
+    harness.emit("session_tree");
+    t.mock.timers.tick(30_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 4, "footer replacement must not leak a second periodic timer");
+    harness.dispose();
+    t.mock.timers.tick(60_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 4, "shutdown must stop periodic and pending refreshes");
   } finally {
     harness.dispose();
     t.mock.timers.reset();

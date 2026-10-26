@@ -382,11 +382,18 @@ test("Plan entry guidance separates implementation steps from unresolved approva
     assert.doesNotMatch(`${enter.description}\n${enter.promptSnippet}\n${guidelines}`, /Use plan-enter before producing or editing an implementation Plan/);
 
     const systemPrompt = await readFile(new URL("../../../.pi/SYSTEM.md", import.meta.url), "utf8");
-    assert.match(systemPrompt, /Internal planning is not Plan mode/);
-    assert.match(systemPrompt, /For agent-initiated entry, state that approval point/);
+    assert.match(systemPrompt, /Default to Act\. Internal planning, task size, multiple files/);
+    assert.match(systemPrompt, /concrete unresolved approval point; explain that point first and load the Plan reference before `plan-enter`/);
     assert.match(systemPrompt, /organize complex tasks before implementing \(brief steps or Todo, not automatic Plan mode\)/);
-    assert.match(systemPrompt, /Do not ask the user to approve the same work again/);
-    assert.match(systemPrompt, /Existing permission gates, failure stop conditions, and explicit locked constraints still apply/);
+    assert.match(systemPrompt, /do not ask for the same approval again/);
+    assert.match(systemPrompt, /Existing permission gates, failure stop conditions, and locked constraints remain binding/);
+    assert.match(systemPrompt, /\[Plan instructions\]\(instructions\/plan\.md\)/);
+
+    const planInstructions = await readFile(new URL("../../../.pi/instructions/plan.md", import.meta.url), "utf8");
+    assert.match(planInstructions, /Internal planning is not Plan mode/);
+    assert.match(planInstructions, /For agent-initiated entry, state that approval point/);
+    assert.match(planInstructions, /Do not ask the user to approve the same work again/);
+    assert.match(planInstructions, /Existing permission gates, failure stop conditions, and explicit locked constraints still apply/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

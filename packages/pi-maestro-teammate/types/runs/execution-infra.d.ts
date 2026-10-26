@@ -609,7 +609,7 @@ export declare function buildExpertLeaderPrompt(objective: string): string;
 export declare function prepareTeammateMode(params: RunTeammateParams): RunTeammateParams;
 /** Normalize the tasks-only public contract into executable graph tasks. */
 export declare function normalizeTeammateParams(params: RunTeammateParams): NormalizeTeammateResult;
-export type PiLaunchSource = "override" | "path-native" | "windows-shim" | "host-entry" | "path-fallback";
+export type PiLaunchSource = "override" | "path-native" | "windows-shim" | "host-entry" | "host-native" | "path-fallback";
 export interface PiLaunchSpec {
     command: string;
     argsPrefix: string[];
@@ -622,6 +622,7 @@ export interface PiSpawnCommandOptions {
     pathValue?: string | null;
     argv?: readonly string[];
     execPath?: string;
+    bunVersion?: string | null;
     appData?: string | null;
     /** @internal deterministic filesystem seam for focused launcher tests. */
     isFile?: (candidate: string) => boolean;

@@ -522,6 +522,7 @@ export function renderSwarmStatusline(theme: Theme, value: string | undefined, w
 // ---------------------------------------------------------------------------
 
 const GIT_REFRESH_INTERVAL = 30_000;
+const GIT_MIN_REFRESH_INTERVAL = 5_000;
 const GIT_DEBOUNCE_MS = 500;
 const WIDTH_POLL_INTERVAL = 500;
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
@@ -555,6 +556,9 @@ export function installStatusline(
 	let invalidateFn: (() => void) | null = null;
 	let gitTimer: ReturnType<typeof setInterval> | null = null;
 	let gitDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let gitRefreshInFlight = false;
+	let gitRefreshPending = false;
+	let lastGitRefreshAt = -Infinity;
 	let disposed = false;
 	let sessionGeneration = 0;
 	let footerGeneration = 0;
@@ -597,21 +601,52 @@ export function installStatusline(
 		invalidate();
 	}
 
-	function scheduleGitRefresh(generation: number): void {
-		if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
+	function canRefreshGit(): boolean {
+		return !disposed && footerCtx?.hasUI === true && !cockpitOwnsFooter && invalidateFn !== null;
+	}
+
+	function stopGitRefresh(): void {
+		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
+		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
+		gitRefreshPending = false;
+	}
+
+	async function runGitRefresh(): Promise<void> {
+		if (!canRefreshGit() || gitRefreshInFlight || !gitRefreshPending) return;
+		gitRefreshPending = false;
+		gitRefreshInFlight = true;
+		lastGitRefreshAt = Date.now();
+		const generation = footerGeneration;
 		const session = sessionGeneration;
 		const refreshCwd = cwd;
-		gitDebounceTimer = setTimeout(async () => {
-			if (disposed) return;
+		try {
 			const git = await refreshGit(pi, refreshCwd);
 			if (
-				disposed
+				!canRefreshGit()
 				|| generation !== footerGeneration
 				|| session !== sessionGeneration
 				|| refreshCwd !== cwd
 			) return;
 			updateGit(git);
-		}, GIT_DEBOUNCE_MS);
+		} finally {
+			gitRefreshInFlight = false;
+			if (gitRefreshPending) scheduleGitRefresh(0);
+		}
+	}
+
+	function scheduleGitRefresh(delay = GIT_DEBOUNCE_MS): void {
+		if (!canRefreshGit()) return;
+		gitRefreshPending = true;
+		if (gitRefreshInFlight || gitDebounceTimer) return;
+		const wait = Math.max(delay, lastGitRefreshAt + GIT_MIN_REFRESH_INTERVAL - Date.now());
+		if (wait <= 0) {
+			void runGitRefresh();
+			return;
+		}
+		gitDebounceTimer = setTimeout(() => {
+			gitDebounceTimer = null;
+			void runGitRefresh();
+		}, wait);
 	}
 
 	// --- Footer registration ---
@@ -619,6 +654,7 @@ export function installStatusline(
 		footerCtx = ctx;
 		if (!ctx.hasUI || cockpitOwnsFooter) return;
 		const generation = ++footerGeneration;
+		stopGitRefresh();
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			disposed = false;
 			// Connect invalidate → requestRender
@@ -657,8 +693,10 @@ export function installStatusline(
 
 			// Subscribe to branch changes for git refresh
 			const unsubBranch = footerData.onBranchChange(() => {
-				scheduleGitRefresh(generation);
+				scheduleGitRefresh();
 			});
+			scheduleGitRefresh(0);
+			gitTimer = setInterval(() => scheduleGitRefresh(0), GIT_REFRESH_INTERVAL);
 
 			return {
 				dispose() {
@@ -667,8 +705,7 @@ export function installStatusline(
 					if (generation !== footerGeneration) return;
 					disposed = true;
 					invalidateFn = null;
-					if (gitTimer) clearInterval(gitTimer);
-					if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
+					stopGitRefresh();
 				},
 
 				invalidate() {
@@ -746,6 +783,8 @@ export function installStatusline(
 		if (nextOwnership === cockpitOwnsFooter) return;
 		cockpitOwnsFooter = nextOwnership;
 		if (cockpitOwnsFooter) {
+			stopGitRefresh();
+			invalidateFn = null;
 			footerGeneration += 1;
 			footerCtx?.ui.setFooter(undefined);
 			return;
@@ -754,13 +793,10 @@ export function installStatusline(
 	});
 
 	pi.on("session_start", (_event, ctx) => {
-		// Clear any leaked timers from prior session
-		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
-		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
-
-		const generation = ++sessionGeneration;
-		const sessionCwd = ctx.cwd;
-		cwd = sessionCwd;
+		stopGitRefresh();
+		sessionGeneration += 1;
+		cwd = ctx.cwd;
+		rs.git = null;
 		disposed = false;
 
 		// Per-session usage sparkline: reset buffer and reload the footer config
@@ -790,21 +826,6 @@ export function installStatusline(
 		// Footer must install synchronously — before any await
 		installFooter(ctx);
 
-		// Fire-and-forget async git refresh
-		refreshGit(pi, sessionCwd).then((git) => {
-			if (disposed || generation !== sessionGeneration || sessionCwd !== cwd) return;
-			updateGit(git);
-		});
-
-		// Periodic git refresh
-		gitTimer = setInterval(() => {
-			if (disposed) return;
-			refreshGit(pi, sessionCwd).then((git) => {
-				if (disposed || generation !== sessionGeneration || sessionCwd !== cwd) return;
-				updateGit(git);
-			});
-		}, GIT_REFRESH_INTERVAL);
-
 	});
 
 	pi.on("session_shutdown", () => {
@@ -813,8 +834,7 @@ export function installStatusline(
 		disposed = true;
 		footerCtx = undefined;
 		invalidateFn = null;
-		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
-		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
+		stopGitRefresh();
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
@@ -836,7 +856,6 @@ export function installStatusline(
 	});
 
 	pi.on("agent_end", () => {
-		scheduleGitRefresh(footerGeneration);
 		invalidate();
 	});
 
@@ -853,8 +872,6 @@ export function installStatusline(
 	pi.on("tool_execution_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage?.();
 		if (usage) rs.contextPercent = usage.percent ?? null;
-		// Debounced git refresh after tool completes (may have edited files)
-		scheduleGitRefresh(footerGeneration);
 		invalidate();
 	});
 

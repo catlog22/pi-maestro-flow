@@ -17,8 +17,8 @@ function wrap(fn: unknown): (ctx: unknown) => Promise<void> {
       Promise.resolve().then(subFn);
     const timers = {
       enable: (options?: { apis?: string[] }) => {
-        const apis = options?.apis?.filter((api): api is "setTimeout" | "setInterval" | "setImmediate" =>
-          api === "setTimeout" || api === "setInterval" || api === "setImmediate",
+        const apis = options?.apis?.filter((api): api is "Date" | "setTimeout" | "setInterval" | "setImmediate" =>
+          api === "Date" || api === "setTimeout" || api === "setInterval" || api === "setImmediate",
         );
         vi.useFakeTimers(apis && apis.length > 0 ? { toFake: apis } : undefined);
       },

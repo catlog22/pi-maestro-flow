@@ -1608,6 +1608,7 @@ export type PiLaunchSource =
   | "path-native"
   | "windows-shim"
   | "host-entry"
+  | "host-native"
   | "path-fallback";
 
 export interface PiLaunchSpec {
@@ -1623,6 +1624,7 @@ export interface PiSpawnCommandOptions {
   pathValue?: string | null;
   argv?: readonly string[];
   execPath?: string;
+  bunVersion?: string | null;
   appData?: string | null;
   /** @internal deterministic filesystem seam for focused launcher tests. */
   isFile?: (candidate: string) => boolean;
@@ -1751,6 +1753,12 @@ export function resolvePiLaunchSpec(options: PiSpawnCommandOptions = {}): PiLaun
   const isFile = options.isFile ?? regularFileExists;
   const readTextFile = options.readTextFile ?? ((candidate: string) => fs.readFileSync(candidate, "utf-8"));
   const execPath = options.execPath ?? process.execPath;
+  const bunVersion = options.bunVersion === undefined ? process.versions.bun : options.bunVersion;
+  // A compiled Pi host is the CLI, not a JS interpreter. Reuse it directly so
+  // PATH shims cannot insert a forwarding process that drops the child's IPC.
+  if (bunVersion && /^pi(?:-bolt)?(?:\.exe)?$/i.test(path.basename(execPath)) && isFile(execPath)) {
+    return { command: execPath, argsPrefix: [], source: "host-native" };
+  }
   const pathCandidates = pathPiCandidates(
     platform,
     options.pathValue === undefined ? process.env.PATH : options.pathValue,

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 export type ProviderKey =
+  | "chatgpt"
   | "codex"
   | "claude"
   | "zai"
@@ -15,6 +16,7 @@ export type ProviderKey =
   | "moonshot"
   | "moonshot-cn";
 export type PiProviderId =
+  | "openai"
   | "openai-codex"
   | "anthropic"
   | "zai"
@@ -568,6 +570,16 @@ function readCodexAccountId(token: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function getChatGPTUsage(): UsageData {
+  // Pi's direct-login grant is not a Codex/WHAM credential.
+  return {
+    session: 0,
+    weekly: 0,
+    quotaHidden: true,
+    notice: "Subscription quota is not exposed by Pi; check https://chatgpt.com/settings/usage",
+  };
 }
 
 export async function fetchCodexUsage(token: string, config: RequestConfig = {}): Promise<UsageData> {
@@ -1183,6 +1195,7 @@ export function detectProvider(
 ): ProviderKey | null {
   if (!model || typeof model === "string") return null;
   switch ((model.provider || "").toLowerCase()) {
+    case "openai": return "chatgpt";
     case "openai-codex": return "codex";
     case "anthropic": return "claude";
     case "zai": return "zai";
@@ -1200,6 +1213,7 @@ export function detectProvider(
 
 export function providerToPiProviderId(provider: ProviderKey): PiProviderId {
   switch (provider) {
+    case "chatgpt": return "openai";
     case "codex": return "openai-codex";
     case "claude": return "anthropic";
     case "zai": return "zai";
@@ -1231,6 +1245,7 @@ export async function fetchAllUsages(
 ): Promise<UsageByProvider> {
   const endpoints = config.endpoints ?? resolveUsageEndpoints(config.env);
   const results: UsageByProvider = {
+    chatgpt: null,
     codex: null,
     claude: null,
     zai: null,
@@ -1253,6 +1268,7 @@ export async function fetchAllUsages(
     }));
   };
 
+  if (tokens.chatgpt) results.chatgpt = getChatGPTUsage();
   if (tokens.codex) assign("codex", fetchCodexUsage(tokens.codex, config));
   if (tokens.claude) {
     assign("claude", fetchClaudeUsageWithFallback(tokens.claude, {

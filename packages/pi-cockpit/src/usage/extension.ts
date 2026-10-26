@@ -44,6 +44,7 @@ import {
 	fetchAllUsages,
 	fetchClaudeUsageWithFallback,
 	fetchCodexUsage,
+	getChatGPTUsage,
 	fetchDeepSeekBalance,
 	fetchKimiUsage,
 	fetchMiniMaxUsage,
@@ -65,6 +66,7 @@ import { type CockpitConfig, DEFAULT_CONFIG } from "../types.ts";
 const EXTENSION_ID = "pi-cockpit:usage-bars";
 const USAGE_UPDATE_EVENT = `${EXTENSION_ID}:update`;
 const PROVIDERS: readonly ProviderKey[] = [
+	"chatgpt",
 	"codex",
 	"claude",
 	"zai",
@@ -79,6 +81,7 @@ const PROVIDERS: readonly ProviderKey[] = [
 ];
 
 const PROVIDER_LABELS: Record<ProviderKey, string> = {
+	chatgpt: "ChatGPT (official)",
 	codex: "Codex",
 	claude: "Claude",
 	zai: "ZAI Coding Plan (Global)",
@@ -624,6 +627,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 
 	const endpoints = resolveUsageEndpoints();
 	const state: UsageState = {
+		chatgpt: null,
 		codex: null,
 		claude: null,
 		zai: null,
@@ -731,7 +735,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 		return false;
 	}
 
-	function isClaudeSubscriptionAuth(source: string | undefined): boolean {
+	function isSubscriptionAuth(source: string | undefined): boolean {
 		// Pi 0.84 exposes AuthResult.source as a human-readable label rather than a
 		// credential-type discriminator. Keep the compatibility assumption in one
 		// place until ModelRegistry exposes the resolved credential type directly.
@@ -746,7 +750,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 
 		try {
 			const resolved = await ctx.modelRegistry.getProviderAuth(providerId);
-			if (provider === "claude" && !isClaudeSubscriptionAuth(resolved?.source)) return {};
+			if ((provider === "claude" || provider === "chatgpt") && !isSubscriptionAuth(resolved?.source)) return {};
 			const token = resolved?.auth.apiKey;
 			if (token) return { token };
 			// Some OAuth flows (e.g. kimi-coding) expose the token only as a Bearer
@@ -778,6 +782,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 			return;
 		}
 
+		if (provider === "chatgpt") state.chatgpt = getChatGPTUsage();
 		if (provider === "codex") state.codex = await fetchCodexUsage(credential.token, { signal });
 		if (provider === "claude") state.claude = await fetchClaudeUsageWithFallback(credential.token, { signal });
 		if (provider === "zai") state.zai = await fetchZaiUsage(credential.token, "zai", { endpoints, signal });
@@ -886,6 +891,20 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 		pollTimer.unref?.();
 	}
 
+	const unsubscribeAccountChanged = pi.events.on("pi:account-changed", (payload: unknown) => {
+		if (!payload || typeof payload !== "object" || !("providerId" in payload) ||
+			typeof payload.providerId !== "string") return;
+		const provider = detectProvider({ provider: payload.providerId });
+		if (!provider) return;
+		state[provider] = null;
+		delete state.available[provider];
+		if (provider === state.activeProvider) {
+			providerPollController?.abort();
+			onStatusChange();
+			if (!isManualRefresh()) void poll();
+		}
+	});
+
 	return {
 		async start(ctx) {
 			currentContext = ctx;
@@ -983,6 +1002,7 @@ export function createUsageSubsystem(options: CreateUsageSubsystemOptions): Usag
 		},
 
 		dispose() {
+			unsubscribeAccountChanged();
 			providerPollController?.abort();
 			providerPollController = undefined;
 			sessionController?.abort();
