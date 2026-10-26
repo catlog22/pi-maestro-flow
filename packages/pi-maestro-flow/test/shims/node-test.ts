@@ -20,7 +20,13 @@ function wrap(fn: unknown): (ctx: unknown) => Promise<void> {
         const apis = options?.apis?.filter((api): api is "Date" | "setTimeout" | "setInterval" | "setImmediate" =>
           api === "Date" || api === "setTimeout" || api === "setInterval" || api === "setImmediate",
         );
-        vi.useFakeTimers(apis && apis.length > 0 ? { toFake: apis } : undefined);
+        const toFake = apis && [
+          ...apis,
+          ...(apis.includes("setTimeout") ? ["clearTimeout" as const] : []),
+          ...(apis.includes("setInterval") ? ["clearInterval" as const] : []),
+          ...(apis.includes("setImmediate") ? ["clearImmediate" as const] : []),
+        ];
+        vi.useFakeTimers(toFake && toFake.length > 0 ? { toFake } : undefined);
       },
       tick: (milliseconds: number) => {
         vi.advanceTimersByTime(milliseconds);

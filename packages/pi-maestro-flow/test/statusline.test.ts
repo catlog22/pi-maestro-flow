@@ -607,6 +607,37 @@ test("Cockpit ownership stops pending Git queries and restores polling when rele
   }
 });
 
+test("footer replacements share one Git polling clock without delaying its next tick", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  let execCalls = 0;
+  const harness = createHarness({ exec: async () => {
+    execCalls++;
+    return { code: 0, stdout: "## main\n", stderr: "" };
+  } });
+  try {
+    await settleAsyncWork();
+    for (let index = 0; index < 3; index++) {
+      t.mock.timers.tick(9_000);
+      harness.emit("session_tree");
+      await settleAsyncWork();
+      assert.equal(execCalls, 1, "replacing a settled footer must not query Git again");
+    }
+    t.mock.timers.tick(3_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 2, "replacement must preserve the original periodic deadline");
+    t.mock.timers.tick(30_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 3, "only one periodic query may run per interval");
+    harness.dispose();
+    t.mock.timers.tick(60_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 3, "shutdown must cancel the shared polling clock");
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
 test("statusline accumulates message usage incrementally and rebuilds only at branch lifecycle boundaries", () => {
   const initialBranch = Array.from({ length: 1_000 }, () => ({
     type: "message",

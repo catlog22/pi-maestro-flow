@@ -611,6 +611,17 @@ export function installStatusline(
 		gitRefreshPending = false;
 	}
 
+	function startGitRefresh(): void {
+		if (!canRefreshGit()) return;
+		if (gitTimer) {
+			// A replacement footer fences the current result, not the polling clock.
+			if (gitRefreshInFlight) scheduleGitRefresh(0);
+			return;
+		}
+		gitTimer = setInterval(() => scheduleGitRefresh(0), GIT_REFRESH_INTERVAL);
+		scheduleGitRefresh(0);
+	}
+
 	async function runGitRefresh(): Promise<void> {
 		if (!canRefreshGit() || gitRefreshInFlight || !gitRefreshPending) return;
 		gitRefreshPending = false;
@@ -654,7 +665,6 @@ export function installStatusline(
 		footerCtx = ctx;
 		if (!ctx.hasUI || cockpitOwnsFooter) return;
 		const generation = ++footerGeneration;
-		stopGitRefresh();
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			disposed = false;
 			// Connect invalidate → requestRender
@@ -695,8 +705,7 @@ export function installStatusline(
 			const unsubBranch = footerData.onBranchChange(() => {
 				scheduleGitRefresh();
 			});
-			scheduleGitRefresh(0);
-			gitTimer = setInterval(() => scheduleGitRefresh(0), GIT_REFRESH_INTERVAL);
+			startGitRefresh();
 
 			return {
 				dispose() {
