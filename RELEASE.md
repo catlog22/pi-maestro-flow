@@ -97,8 +97,55 @@ an integration seam, not a claim that every client implements a Refine UI.
   are not disabled test cases.
 - Documentation `tsc && vite build` passed (2466 modules); the existing >500 kB
   chunk advisory remains. No browser visual validation is claimed.
-- Packaging and registry install/startup results are recorded below only after
-  execution; no previous release's verification waiver is reused.
+- Packaging and registry installation/runtime observations are recorded below;
+  the complete smoke command failed at process shutdown. No previous release's
+  verification waiver is reused, and no v0.35.0 tag/GitHub Release is claimed.
+
+## Published artifacts
+
+Candidate commit **`b2451eac`** contains the 13 commits since **v0.34.1**, including
+release metadata. Actual immutable tarballs passed `npm publish --dry-run` and
+were published in dependency order. Each contains bundled settings-core, no
+private Pi SDK/typebox, and Flow includes all four on-demand instruction files.
+The registry SHA-1s match the exact tested tarballs:
+
+| Package | Files | Packed / unpacked bytes | Registry-matched SHA-1 |
+|---|---:|---:|---|
+| pi-maestro-teammate@2.10.1 | 492 | 1259775 / 5625653 | `d58061a85f074a9d945618141fb1c908dc1c36be` |
+| pi-cockpit@0.24.5 | 115 | 333306 / 1251005 | `1a563a05c69344d13fef8bec6b689e410c4c7496` |
+| pi-maestro-flow@0.35.0 | 1180 | 3869057 / 14885286 | `661c04954c06be294c36d09f071c22ecc9e31cd1` |
+
+npm initially accepted each package for processing before metadata became
+available. The first bounded Flow metadata wait expired; a subsequent read-only
+observation found the version with the correct SHA. No package was republished.
+
+## Registry install and incomplete shutdown acceptance
+
+- The first fresh installation failed with **ETARGET**: npm's log showed a cache
+  hit for the pre-publication Flow packument, despite the version being visible
+  online. This failure is retained, not called a passing install.
+- After adding **`--prefer-online`**, registry installation completed at
+  **`D:/tmp/pi-registry035-RwtxIK`**, with isolated `HOME` and `USERPROFILE`.
+  Flow **0.35.0**, Teammate **2.10.1**, and Cockpit **0.24.5** were verified as
+  real installed directories, not workspace symlinks. Host Pi **0.99.0** packages
+  were explicit inputs; install used `--legacy-peer-deps --omit=optional
+  --ignore-scripts --no-audit --no-fund`, within the existing 600-second bound.
+- Flow's real **postinstall passed**, and the four instruction references were
+  present. This is npm consumer acceptance, not a claim that the `pi install`
+  managed wrapper or optional/native providers were tested.
+- A real offline Pi RPC process loaded all three installed extensions. Both
+  **`get_state`** and **`get_messages`** returned `success: true`; the session
+  probe recorded registered `todo`, `teammate`, `observe`, `plan-enter`, `browser`
+  and `computer_use` tools. No model request was made and stderr was empty.
+- **The complete runtime command failed:** after stdin EOF and shutdown cleanup
+  output, the process did not exit within **45 seconds**, resulting in
+  **ETIMEDOUT**. Startup/RPC/tool-registration evidence does not prove clean
+  shutdown. The responsible active handle or pending shutdown hook is not yet
+  localized. No timeout increase, forced-success conversion or further retry was
+  performed after the cumulative installation/startup failure budget was reached.
+- **Release blocker:** npm publication is complete; the v0.35.0 tag and GitHub
+  Release remain withheld pending user-guided shutdown diagnosis or explicit
+  acceptance of this exact incomplete boundary.
 
 ---
 
