@@ -52,6 +52,12 @@ export interface SessionHistoryInventoryEntry {
 export interface SessionHistoryInventory {
   generation?: number;
   entries: readonly SessionHistoryInventoryEntry[];
+  /** Absolute candidate offset of this supplied window (default 0). */
+  offset?: number;
+  /** Additional candidates exist beyond this window (default false). */
+  hasMore?: boolean;
+  /** Discovery itself was not budget-truncated (default true). */
+  complete?: boolean;
 }
 
 export type SessionHistoryInventoryValue = SessionHistoryInventory | readonly SessionHistoryInventoryEntry[];
@@ -105,6 +111,8 @@ export interface SessionHistorySearchOptions extends SessionHistoryOptions {
   sort?: "source" | "relevance";
   /** Zero-based match offset within this fresh scan (not a snapshot cursor). */
   offset?: number;
+  /** Zero-based unique candidate offset; independent of match pagination. */
+  scanOffset?: number;
 }
 export type SessionHistoryReadOptions = SessionHistoryOptions;
 export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
@@ -147,6 +155,8 @@ interface ScanMetrics {
   bytesRead: number;
   truncated: boolean;
   omissions: readonly SessionHistoryOmission[];
+  omissionCounts: Readonly<Partial<Record<SessionHistoryOmissionReason, number>>>;
+  omissionsTruncated: boolean;
 }
 
 export interface SessionHistoryListResult extends ScanMetrics {
@@ -168,10 +178,14 @@ export interface SessionHistorySearchResult extends ScanMetrics {
   generation?: number;
   query: string;
   matches: readonly SessionHistorySearchMatch[];
-  /** Total matches in this scan, independent of pagination. */
+  /** Matches in the current file window, not cumulative across scan pages. */
   matchCount: number;
+  matchCountRelation: "exact" | "lower_bound";
+  coverage: "complete" | "partial" | "failed";
+  /** Match pagination within the current file window only. */
   hasMore: boolean;
   nextOffset?: number;
+  scan: { offset: number; hasMore: boolean; nextOffset?: number };
 }
 export interface SessionHistoryCompactionResult extends ScanMetrics {
   version: typeof SESSION_HISTORY_VERSION;
@@ -217,6 +231,8 @@ interface LoadedSession {
 interface ScanResult extends ScanMetrics {
   generation?: number;
   sessions: LoadedSession[];
+  coverage: SessionHistorySearchResult["coverage"];
+  scan: SessionHistorySearchResult["scan"];
 }
 interface CandidateResult {
   loaded?: LoadedSession;
@@ -285,12 +301,14 @@ export class SessionHistoryService {
     if (sort !== "source" && sort !== "relevance") throw new TypeError("sort must be source or relevance.");
     const offset = options.offset ?? 0;
     if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError("offset must be a non-negative safe integer.");
+    const scanOffset = options.scanOffset ?? 0;
+    if (!Number.isSafeInteger(scanOffset) || scanOffset < 0) throw new TypeError("scanOffset must be a non-negative safe integer.");
     const folded = mode === "terms" ? normalizedSearchText(query) : query.toLocaleLowerCase("en-US");
     if (mode === "terms" && folded.length === 0) throw new TypeError("terms query must contain non-whitespace text.");
     const terms = mode === "terms" ? [...new Set(folded.split(" "))] : [folded];
     const include = normalizedInclude(options.include);
     const limit = boundedLimit(options.limit);
-    const scan = await this.#scan(include, options.signal);
+    const scan = await this.#scan(include, options.signal, scanOffset);
     const ranked: Array<{ entry: SessionHistoryEntry; index: number; rank: number; span: number; sourceOrder: number }> = [];
     for (const session of scan.sessions) {
       for (const entry of session.entries) {
@@ -327,6 +345,9 @@ export class SessionHistoryService {
       query,
       matches: Object.freeze(matches),
       matchCount: ranked.length,
+      matchCountRelation: scan.coverage === "complete" ? "exact" as const : "lower_bound" as const,
+      coverage: scan.coverage,
+      scan: scan.scan,
       hasMore: remaining > 0,
       ...(remaining > 0 ? { nextOffset: offset + matches.length } : {}),
     }, remaining);
@@ -417,33 +438,45 @@ export class SessionHistoryService {
     return this.read({ ...options, include, ...parsed });
   }
 
-  async #scan(include: ReadonlySet<SessionHistoryInclude>, signal?: AbortSignal): Promise<ScanResult> {
+  async #scan(include: ReadonlySet<SessionHistoryInclude>, signal?: AbortSignal, scanOffset = 0): Promise<ScanResult> {
     const inventory = await resolveInventory(this.#inventory, signal);
-    if (inventory.error) {
+    if (inventory.error || inventory.offset > scanOffset) {
       return { sessions: [], filesRead: 0, bytesRead: 0, truncated: false,
-        omissions: [{ reason: "inventory-error", message: inventory.error }] };
+        omissions: [{ reason: "inventory-error", message: inventory.error ?? "Host inventory starts after the requested scan offset." }],
+        omissionCounts: Object.freeze({ "inventory-error": 1 }), omissionsTruncated: false,
+        coverage: "failed", scan: { offset: scanOffset, hasMore: false } };
     }
     const omissions: SessionHistoryOmission[] = [];
+    const omissionCounts: Partial<Record<SessionHistoryOmissionReason, number>> = {};
+    let omissionsTruncated = false;
     const addOmission = (value: SessionHistoryOmission): void => {
+      omissionCounts[value.reason] = (omissionCounts[value.reason] ?? 0) + (value.count ?? 1);
       if (omissions.length < MAX_SESSION_HISTORY_OMISSIONS) omissions.push(value);
+      else omissionsTruncated = true;
     };
     const sessions: LoadedSession[] = [];
     const seenPaths = new Set<string>();
     const seenIds = new Set<string>();
     let filesConsidered = 0;
+    let filesSkipped = 0;
     let filesRead = 0;
     let bytesRead = 0;
-    let truncated = false;
+    let truncated = inventory.hasMore || !inventory.complete;
+    let scanHasMore = inventory.hasMore;
+    let incomplete = scanOffset > 0 || truncated;
     for (const raw of inventory.entries) {
       checkAbort(signal);
       const candidate = normalizeInventoryEntry(raw);
-      if (!candidate) { addOmission({ reason: "invalid-inventory" }); continue; }
+      if (!candidate) { addOmission({ reason: "invalid-inventory" }); incomplete = true; continue; }
       const pathKey = process.platform === "win32" ? resolve(candidate.path).toLowerCase() : resolve(candidate.path);
       if (seenPaths.has(pathKey)) { addOmission({ reason: "duplicate", fileName: candidate.fileName, id: candidate.id }); continue; }
       seenPaths.add(pathKey);
+      if (filesSkipped < scanOffset - inventory.offset) { filesSkipped += 1; continue; }
       if (filesConsidered >= MAX_SESSION_HISTORY_FILES) {
         addOmission({ reason: "file-limit", fileName: candidate.fileName, sessionId: candidate.sessionId, id: candidate.id });
         truncated = true;
+        incomplete = true;
+        scanHasMore = true;
         continue;
       }
       filesConsidered += 1;
@@ -451,6 +484,7 @@ export class SessionHistoryService {
       bytesRead += result.bytesRead;
       if (result.omission) {
         addOmission(result.omission);
+        incomplete = true;
         continue;
       }
       if (!result.loaded) continue;
@@ -458,6 +492,7 @@ export class SessionHistoryService {
       if (seenIds.has(result.loaded.summary.sessionId)) {
         addOmission({ reason: "duplicate-session-id", sessionId: result.loaded.summary.sessionId });
         filesRead -= 1;
+        incomplete = true;
         continue;
       }
       seenIds.add(result.loaded.summary.sessionId);
@@ -466,6 +501,11 @@ export class SessionHistoryService {
     return {
       ...(inventory.generation === undefined ? {} : { generation: inventory.generation }),
       sessions, filesRead, bytesRead, truncated, omissions: Object.freeze(omissions),
+      omissionCounts: Object.freeze(omissionCounts), omissionsTruncated,
+      coverage: filesConsidered > 0 && sessions.length === 0 ? "failed" : incomplete ? "partial" : "complete",
+      scan: { offset: scanOffset, hasMore: scanHasMore,
+        ...(scanHasMore && filesConsidered > 0 && Number.isSafeInteger(scanOffset + filesConsidered)
+          ? { nextOffset: scanOffset + filesConsidered } : {}) },
     };
   }
 }
@@ -494,17 +534,20 @@ export function readSessionHistoryTurn(source: SessionHistoryInventorySource | S
 
 async function resolveInventory(source: SessionHistoryInventorySource, signal?: AbortSignal): Promise<{
   entries: readonly SessionHistoryInventoryEntry[]; generation?: number; error?: string;
+  offset: number; hasMore: boolean; complete: boolean;
 }> {
   try {
     checkAbort(signal);
     const value = typeof source === "function" ? await source(signal)
       : isInventoryProviderObject(source) ? await source.list(signal) : source;
-    if (Array.isArray(value)) return { entries: Object.freeze([...value]) };
-    if (!isInventoryValue(value)) return { entries: [], error: "Host session inventory is malformed." };
-    return { entries: Object.freeze([...value.entries]), ...(value.generation === undefined ? {} : { generation: value.generation }) };
+    if (Array.isArray(value)) return { entries: Object.freeze([...value]), offset: 0, hasMore: false, complete: true };
+    if (!isInventoryValue(value)) return { entries: [], offset: 0, hasMore: false, complete: true, error: "Host session inventory is malformed." };
+    return { entries: Object.freeze([...value.entries]), offset: value.offset ?? 0,
+      hasMore: value.hasMore ?? false, complete: value.complete ?? true,
+      ...(value.generation === undefined ? {} : { generation: value.generation }) };
   } catch (error) {
     if (signal?.aborted) throw signal.reason ?? error;
-    return { entries: [], error: error instanceof Error ? error.message : String(error) };
+    return { entries: [], offset: 0, hasMore: false, complete: true, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -756,9 +799,15 @@ function makeEntryRead(loaded: LoadedSession, entryId: string, limit: number): S
 
 function resultWithMetrics<T extends object>(scan: ScanResult, value: T, omitted: number): T & ScanMetrics {
   const omissions = [...scan.omissions];
-  if (omitted > 0 && omissions.length < MAX_SESSION_HISTORY_OMISSIONS) omissions.push({ reason: "result-limit", count: omitted });
+  const omissionCounts = { ...scan.omissionCounts };
+  const sampleOverflow = omitted > 0 && omissions.length >= MAX_SESSION_HISTORY_OMISSIONS;
+  if (omitted > 0) {
+    omissionCounts["result-limit"] = (omissionCounts["result-limit"] ?? 0) + omitted;
+    if (!sampleOverflow) omissions.push({ reason: "result-limit", count: omitted });
+  }
   return { ...value, filesRead: scan.filesRead, bytesRead: scan.bytesRead,
-    truncated: scan.truncated || omitted > 0, omissions: Object.freeze(omissions) };
+    truncated: scan.truncated || omitted > 0, omissions: Object.freeze(omissions),
+    omissionCounts: Object.freeze(omissionCounts), omissionsTruncated: scan.omissionsTruncated || sampleOverflow };
 }
 
 function contentText(content: unknown): string {
@@ -810,7 +859,7 @@ function boundedLimit(value: number | undefined): number {
   return value;
 }
 function rejectSearchOptions(options: SessionHistoryOptions): void {
-  for (const key of ["mode", "sort", "offset"] as const) {
+  for (const key of ["mode", "sort", "offset", "scanOffset"] as const) {
     if (key in options) throw new TypeError(`${key} is available only for search.`);
   }
 }
@@ -888,6 +937,10 @@ function isInventoryProviderObject(value: unknown): value is SessionHistoryInven
 function isInventoryValue(value: unknown): value is SessionHistoryInventory {
   return Boolean(value && typeof value === "object" && !Array.isArray(value)
     && Array.isArray((value as { entries?: unknown }).entries)
+    && ((value as { offset?: unknown }).offset === undefined
+      || Number.isSafeInteger((value as { offset: number }).offset) && (value as { offset: number }).offset >= 0)
+    && ((value as { hasMore?: unknown }).hasMore === undefined || typeof (value as { hasMore?: unknown }).hasMore === "boolean")
+    && ((value as { complete?: unknown }).complete === undefined || typeof (value as { complete?: unknown }).complete === "boolean")
     && ((value as { generation?: unknown }).generation === undefined
       || typeof (value as { generation?: unknown }).generation === "number"
       && Number.isSafeInteger((value as { generation: number }).generation)

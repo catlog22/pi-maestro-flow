@@ -374,12 +374,18 @@ test("search validates options before scanning and non-search rejects search-onl
   for (const offset of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
     await assert.rejects(service.search("needle", { offset }), /offset/);
   }
+  for (const scanOffset of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(service.search("needle", { scanOffset }), /scanOffset/);
+  }
+  await assert.rejects(service.search("", { scanOffset: 0 }), /query/);
+  await assert.rejects(service.search("needle", { scanOffset: 0, limit: 0 }), /limit/);
+  await assert.rejects(service.search("needle", { scanOffset: 0, include: [] }), /include/);
   for (const query of [" ", "\n\t", "\u3000"]) {
     await assert.rejects(service.search(query, { mode: "terms" }), /non-whitespace/);
   }
   await assert.rejects(service.search("needle", { mode: "regex" as "literal" }), /mode/);
   await assert.rejects(service.search("needle", { sort: "date" as "source" }), /sort/);
-  for (const extra of [{ offset: 0 }, { mode: "literal" }, { sort: "source" }]) {
+  for (const extra of [{ offset: 0 }, { scanOffset: 0 }, { mode: "literal" }, { sort: "source" }]) {
     await assert.rejects(service.list({ limit: 1, ...extra }), /only for search/);
     await assert.rejects(service.compactions({ limit: 1, ...extra }), /only for search/);
     await assert.rejects(service.read({ sessionId: "session", ...extra }), /only for search/);
@@ -399,4 +405,169 @@ test("last search page keeps file-limit truncation when the scan is incomplete",
   assert.equal("nextOffset" in result, false);
   assert.ok(result.omissions.some((omission) => omission.reason === "file-limit"));
   assert.ok(!result.omissions.some((omission) => omission.reason === "result-limit"));
+});
+
+test("scan pagination visits 201 unique candidates and match pagination stays within each window", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const files = Array.from({ length: 201 }, (_, index) => writeTranscript(dir, `${index}.jsonl`, [
+    header(`s${index}`), user("u", null, index < 100 ? "ordinary text" : "needle"),
+  ]));
+  // Repeated inventory paths do not consume a scan position, even across the boundary.
+  const entries = inventory(...files.flatMap((file) => [file, file]));
+  const service = new SessionHistoryService(entries);
+  const first = await service.search("needle");
+  assert.deepEqual(first, await service.search("needle", { scanOffset: 0 }));
+  assert.deepEqual(first.matches, []);
+  assert.equal(first.matchCount, 0);
+  assert.equal(first.hasMore, false);
+  assert.equal(first.nextOffset, undefined);
+  assert.deepEqual(first.scan, { offset: 0, hasMore: true, nextOffset: 100 });
+  assert.equal(first.filesRead, 100);
+  assert.equal(first.omissionCounts["file-limit"], 101);
+
+  const seen: string[] = [];
+  for (const scanOffset of [100, 200]) {
+    let offset = 0;
+    do {
+      const page = await service.search("needle", { scanOffset, offset, limit: 20 });
+      assert.equal(page.filesRead, scanOffset === 100 ? 100 : 1);
+      assert.equal(page.matchCount, scanOffset === 100 ? 100 : 1);
+      assert.equal(page.coverage, "partial", "a final nonzero scan offset is still partial corpus coverage");
+      assert.equal(page.matchCountRelation, "lower_bound");
+      assert.deepEqual(page.scan, scanOffset === 100
+        ? { offset: 100, hasMore: true, nextOffset: 200 }
+        : { offset: 200, hasMore: false });
+      assert.equal(page.hasMore, scanOffset === 100 && offset < 80);
+      assert.equal(page.truncated, page.scan.hasMore || page.hasMore);
+      seen.push(...page.matches.map((match) => match.sessionId));
+      offset = page.nextOffset ?? page.matchCount;
+    } while (offset < (scanOffset === 100 ? 100 : 1));
+  }
+  assert.deepEqual(seen, files.slice(100).map((_, index) => `s${index + 100}`));
+  assert.equal(new Set(seen).size, 101);
+  assert.equal("path" in first.scan, false);
+});
+
+test("coverage distinguishes complete, partial, failed and genuinely empty inventories", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const valid = writeTranscript(dir, "valid.jsonl", [header("valid"), user("u", null, "needle")]);
+  const invalid = writeTranscript(dir, "invalid.jsonl", [user("u", null, "needle")]);
+  const missing = path.join(dir, "missing.jsonl");
+  const cases = [
+    { entries: [], coverage: "complete", matchCount: 0 },
+    { entries: inventory(valid), coverage: "complete", matchCount: 1 },
+    { entries: inventory(valid, valid), coverage: "complete", matchCount: 1 },
+    { entries: inventory(valid, invalid, missing), coverage: "partial", matchCount: 1 },
+    { entries: inventory(invalid, missing), coverage: "failed", matchCount: 0 },
+    { entries: [{ path: "relative.jsonl" }], coverage: "partial", matchCount: 0 },
+  ] as const;
+  for (const { entries, coverage, matchCount } of cases) {
+    const result = await new SessionHistoryService(entries).search("needle");
+    assert.equal(result.coverage, coverage);
+    assert.equal(result.matchCountRelation, coverage === "complete" ? "exact" : "lower_bound");
+    assert.equal(result.matchCount, matchCount);
+    assert.deepEqual(result.scan, { offset: 0, hasMore: false });
+  }
+  const failed = await new SessionHistoryService(() => { throw new Error("inventory unavailable"); }).search("needle");
+  assert.equal(failed.coverage, "failed");
+  assert.equal(failed.matchCountRelation, "lower_bound");
+  assert.deepEqual(failed.omissionCounts, { "inventory-error": 1 });
+  assert.equal(failed.omissionsTruncated, false);
+  assert.equal(failed.filesRead, 0);
+
+  const skipped = await new SessionHistoryService(inventory(valid)).search("needle", { scanOffset: 1 });
+  assert.equal(skipped.coverage, "partial");
+  assert.equal(skipped.matchCountRelation, "lower_bound");
+  assert.deepEqual(skipped.scan, { offset: 1, hasMore: false });
+  const huge = await new SessionHistoryService(inventory(valid)).search("needle", { scanOffset: Number.MAX_SAFE_INTEGER });
+  assert.equal(huge.filesRead, 0);
+  assert.deepEqual(huge.scan, { offset: Number.MAX_SAFE_INTEGER, hasMore: false });
+});
+
+test("omission totals survive the 64 sample cap, including file and result limits", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const failures = Array.from({ length: 80 }, (_, index) => path.join(dir, `missing-${index}.jsonl`));
+  const valid = Array.from({ length: 25 }, (_, index) => writeTranscript(dir, `${index}.jsonl`, [
+    header(`s${index}`), user("u", null, "needle"),
+  ]));
+  const result = await new SessionHistoryService(inventory(...failures, ...valid)).search("needle", { limit: 1 });
+  assert.equal(result.filesRead, 20);
+  assert.equal(result.matchCount, 20);
+  assert.equal(result.coverage, "partial");
+  assert.equal(result.omissions.length, 64);
+  assert.equal(result.omissionsTruncated, true);
+  assert.deepEqual(result.omissionCounts, { missing: 80, "file-limit": 5, "result-limit": 19 });
+  assert.deepEqual(result.scan, { offset: 0, hasMore: true, nextOffset: 100 });
+  assert.equal(result.hasMore, true);
+  assert.equal(result.nextOffset, 1);
+  assert.ok(!result.omissions.some((item) => item.reason === "result-limit"));
+  assert.doesNotMatch(JSON.stringify(result.omissionCounts), /missing-\d|jsonl|path|fileName/);
+  assert.ok(Object.isFrozen(result.omissionCounts));
+
+  const list = await new SessionHistoryService(inventory(...failures, ...valid)).list({ limit: 1 });
+  assert.deepEqual(list.omissionCounts, result.omissionCounts);
+  assert.equal(list.omissionsTruncated, true);
+  const exactCap = await new SessionHistoryService(inventory(...failures.slice(0, 64))).search("needle");
+  assert.equal(exactCap.omissions.length, 64);
+  assert.equal(exactCap.omissionsTruncated, false);
+  assert.deepEqual(exactCap.omissionCounts, { missing: 64 });
+});
+
+test("inventory windows honor base offsets, unseen candidates and discovery completeness", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const one = writeTranscript(dir, "one.jsonl", [header("one"), user("u", null, "needle")]);
+  const two = writeTranscript(dir, "two.jsonl", [header("two"), user("u", null, "needle")]);
+  const missing = path.join(dir, "missing.jsonl");
+  const entries = [
+    { path: "invalid-relative.jsonl" }, ...inventory(one, one, missing, two),
+  ];
+  const service = new SessionHistoryService({ generation: 9, entries, offset: 100, hasMore: true });
+  const result = await service.search("needle", { scanOffset: 101 });
+  assert.equal(result.generation, 9);
+  assert.deepEqual(result.matches.map((match) => match.sessionId), ["two"]);
+  assert.equal(result.filesRead, 1);
+  assert.equal(result.hasMore, false);
+  assert.equal(result.nextOffset, undefined);
+  assert.deepEqual(result.scan, { offset: 101, hasMore: true, nextOffset: 103 });
+  assert.deepEqual(result.omissionCounts, { "invalid-inventory": 1, duplicate: 1, missing: 1 });
+  assert.equal(result.coverage, "partial");
+  assert.equal(result.truncated, true);
+
+  for (const hasMore of [false, true]) {
+    const incomplete = await new SessionHistoryService({ entries: [], complete: false, hasMore }).search("needle");
+    assert.equal(incomplete.coverage, "partial");
+    assert.equal(incomplete.matchCountRelation, "lower_bound");
+    assert.equal(incomplete.truncated, true);
+    assert.deepEqual(incomplete.scan, { offset: 0, hasMore });
+    assert.equal(incomplete.scan.nextOffset, undefined, "no candidate progress must not invent a continuation");
+  }
+  const completeWindow = await new SessionHistoryService({ entries: inventory(two), offset: 102 }).search("needle", { scanOffset: 102 });
+  assert.equal(completeWindow.coverage, "partial");
+  assert.equal(completeWindow.truncated, false);
+  assert.deepEqual(completeWindow.scan, { offset: 102, hasMore: false });
+  const discoverMore = await new SessionHistoryService({ entries: inventory(one), hasMore: true }).search("needle");
+  assert.deepEqual(discoverMore.scan, { offset: 0, hasMore: true, nextOffset: 1 });
+  assert.equal(discoverMore.truncated, true);
+  assert.equal(discoverMore.coverage, "partial");
+});
+
+test("invalid inventory window metadata fails closed without reading candidates", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = writeTranscript(dir, "one.jsonl", [header("one"), user("u", null, "needle")]);
+  for (const metadata of [
+    { offset: -1 }, { offset: 0.5 }, { offset: Number.MAX_SAFE_INTEGER + 1 },
+    { hasMore: "true" }, { complete: 0 }, { offset: 1 },
+  ]) {
+    const service = new SessionHistoryService(() => ({ entries: inventory(file), ...metadata }) as never);
+    const result = await service.search("needle");
+    assert.equal(result.coverage, "failed");
+    assert.equal(result.filesRead, 0);
+    assert.deepEqual(result.omissionCounts, { "inventory-error": 1 });
+    assert.deepEqual(result.scan, { offset: 0, hasMore: false });
+  }
 });

@@ -406,6 +406,10 @@ test("session history reports workspace inventory enumeration errors instead of 
         assert.deepEqual(payload.matches, []);
         assert.deepEqual(payload.omissions, [{ reason: "inventory-error" }]);
         assert.equal(payload.filesRead, 0);
+        assert.equal(payload.coverage, "failed");
+        assert.equal(payload.matchCountRelation, "lower_bound");
+        assert.deepEqual(payload.omissionCounts, { "inventory-error": 1 });
+        assert.equal(payload.omissionsTruncated, false);
         assert.equal(text.includes(root), false);
         assert.doesNotMatch(text, /not-a-directory|ENOTDIR/);
       }
@@ -504,7 +508,7 @@ test("session history registration exposes unified recovery and historical disco
   assert.deepEqual(schema.properties?.action?.enum, ["list_sessions", "search", "read_turn", "timeline", "read_checkpoint"]);
   assert.deepEqual(schema.properties?.scope?.enum, ["current_session", "workspace_sessions", "teammates"]);
   assert.deepEqual(schema.properties?.include?.items?.enum, ["user", "assistant", "visible_custom", "compaction", "tool_result"]);
-  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "mode", "sort", "offset", "sessionId", "turn", "checkpointId", "include", "limit"]);
+  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "mode", "sort", "offset", "scanOffset", "sessionId", "turn", "checkpointId", "include", "limit"]);
   assert.deepEqual(schema.properties?.mode?.enum, ["literal", "terms"]);
   assert.deepEqual(schema.properties?.sort?.enum, ["source", "relevance"]);
   assert.equal(schema.additionalProperties, false);
@@ -568,13 +572,13 @@ test("tool rejects search-only misuse and invalid search settings before accessi
   const options = { inventory: () => { reads += 1; return []; } };
   const ctx = { cwd: process.cwd(), sessionManager: {} } as unknown as ExtensionContext;
   for (const action of ["list_sessions", "read_turn", "timeline", "read_checkpoint"]) {
-    for (const extra of [{ offset: 0 }, { mode: "literal" }, { sort: "source" }]) {
+    for (const extra of [{ offset: 0 }, { scanOffset: 0 }, { mode: "literal" }, { sort: "source" }]) {
       const result = await executeSessionHistory({ action, turn: 1, checkpointId: "checkpoint", ...extra }, ctx, options);
       assert.equal((result as { isError?: boolean }).isError, true);
       assert.match(resultText(result), /only for search/);
     }
   }
-  for (const extra of [{ offset: -1 }, { offset: 0.5 }, { offset: "0" }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { mode: "regex" }, { sort: "date" }, { mode: "terms", query: " \n\u3000" }]) {
+  for (const extra of [{ offset: -1 }, { offset: 0.5 }, { offset: "0" }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { scanOffset: -1 }, { scanOffset: 0.5 }, { scanOffset: "0" }, { scanOffset: Number.MAX_SAFE_INTEGER + 1 }, { mode: "regex" }, { sort: "date" }, { mode: "terms", query: " \n\u3000" }]) {
     const result = await executeSessionHistory({ action: "search", query: "needle", ...extra }, ctx, options);
     assert.equal((result as { isError?: boolean }).isError, true);
   }
@@ -582,4 +586,77 @@ test("tool rejects search-only misuse and invalid search settings before accessi
   const literalSpaces = await executeSessionHistory({ action: "search", query: " \n" }, ctx, options);
   assert.equal((literalSpaces as { isError?: boolean }).isError, undefined);
   assert.equal(reads, 1);
+});
+
+test("workspace scan continuation reaches files beyond the discovery window without raising read budgets", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-file-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  await writeTranscript(current, [header("current-session"), user("u", null, "ordinary")]);
+  await Promise.all(Array.from({ length: 804 }, (_, index) => writeTranscript(
+    join(root, `${String(index).padStart(4, "0")}.jsonl`),
+    [header(`s${index}`), user("u", null, index === 0 ? "older needle" : "ordinary")],
+  )));
+  const ctx = context(root, current);
+  let scanOffset = 0;
+  const found: string[] = [];
+  const visited: number[] = [];
+  do {
+    const result = await executeSessionHistory({
+      action: "search", scope: "workspace_sessions", query: "older needle", mode: "terms", scanOffset,
+    }, ctx);
+    assert.notEqual(result.isError, true);
+    const payload = JSON.parse(resultText(result));
+    assert.equal(payload.coverage, "partial");
+    assert.equal(payload.matchCountRelation, "lower_bound");
+    assert.equal(payload.hasMore, false, "no match pages does not mean no more files");
+    assert.equal(payload.scan.offset, scanOffset);
+    assert.ok(payload.filesRead <= MAX_SESSION_HISTORY_FILES);
+    assert.equal(resultText(result).includes(root), false);
+    visited.push(scanOffset);
+    found.push(...payload.matches.map((match: { sessionId: string }) => match.sessionId));
+    if (!payload.scan.hasMore) break;
+    assert.ok(payload.scan.nextOffset > scanOffset);
+    scanOffset = payload.scan.nextOffset;
+  } while (visited.length < 10);
+  assert.deepEqual(visited, [0, 100, 200, 300, 400, 500, 600, 700, 800]);
+  assert.deepEqual(found, ["s0"]);
+});
+
+test("teammate file windows cross directory boundaries and report the directory discovery cap", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-teammate-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  await writeTranscript(current, [header("current-session"), user("u", null, "ordinary")]);
+  const ctx = context(root, current);
+  const absent = JSON.parse(resultText(await executeSessionHistory({ action: "search", scope: "teammates", query: "needle" }, ctx)));
+  assert.equal(absent.coverage, "complete");
+  assert.equal(absent.matchCountRelation, "exact");
+  for (const name of ["a", "b"]) {
+    const dir = join(root, "current", name);
+    await mkdir(dir, { recursive: true });
+    await Promise.all(Array.from({ length: 55 }, (_, index) => writeTranscript(
+      join(dir, `${String(index).padStart(3, "0")}.jsonl`),
+      [header(`${name}-${index}`), user("u", null, "needle")],
+    )));
+  }
+  const request = { action: "search", scope: "teammates", query: "needle" };
+  const first = JSON.parse(resultText(await executeSessionHistory(request, ctx)));
+  assert.equal(first.filesRead, 100);
+  assert.equal(first.matchCount, 100);
+  assert.deepEqual(first.scan, { offset: 0, hasMore: true, nextOffset: 100 });
+  const last = JSON.parse(resultText(await executeSessionHistory({ ...request, scanOffset: first.scan.nextOffset }, ctx)));
+  assert.equal(last.filesRead, 10);
+  assert.equal(last.matchCount, 10);
+  assert.equal(last.coverage, "partial");
+  assert.equal(last.scan.hasMore, false);
+  assert.equal(last.hasMore, false);
+  assert.ok(last.matches.every((match: { sessionId: string }) => match.sessionId.startsWith("b-")));
+
+  await Promise.all(Array.from({ length: MAX_SESSION_HISTORY_FILES * 4 - 1 }, (_, index) =>
+    mkdir(join(root, "current", `empty-${String(index).padStart(3, "0")}`))));
+  const capped = JSON.parse(resultText(await executeSessionHistory({ ...request, scanOffset: 110 }, ctx)));
+  assert.equal(capped.coverage, "partial", "directory discovery cap cannot claim complete empty coverage");
+  assert.equal(capped.truncated, true);
+  assert.equal(capped.scan.hasMore, false, "unknown directories do not invent a file continuation");
 });

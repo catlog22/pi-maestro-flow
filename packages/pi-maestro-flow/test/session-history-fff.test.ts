@@ -620,3 +620,47 @@ test("session history uses FFF only for workspace search", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("FFF priorities survive separate match and file pages without losing older sessions", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-fff-file-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  await writeFile(current, `${header("current")}\n${user("u", "needle")}\n`);
+  await Promise.all(Array.from({ length: 102 }, (_, index) => writeFile(
+    join(root, `${String(index).padStart(4, "0")}.jsonl`), `${header(`s${index}`)}\n${user("u", "needle")}\n`,
+  )));
+  const accelerator: SessionHistoryFffCandidateAccelerator = {
+    async search() { return { available: true, complete: false, entries: [{ path: join(root, "0000.jsonl") }] }; },
+    destroy() {},
+  };
+  const ctx = context(root, current);
+  const seen: string[] = [];
+  let scanOffset = 0;
+  let moreFiles: boolean;
+  do {
+    let offset = 0;
+    let moreMatches: boolean;
+    let nextScanOffset: number | undefined;
+    do {
+      const payload = JSON.parse(resultText(await executeSessionHistory({
+        action: "search", scope: "workspace_sessions", query: "needle", scanOffset, offset, limit: 20,
+      }, ctx, { candidateAccelerator: accelerator })));
+      assert.equal(payload.coverage, "partial");
+      assert.equal(payload.matchCountRelation, "lower_bound");
+      assert.equal(payload.discovery.candidateComplete, false);
+      assert.ok(payload.filesRead <= MAX_SESSION_HISTORY_FILES);
+      seen.push(...payload.matches.map((match: { sessionId: string }) => match.sessionId));
+      moreMatches = payload.hasMore;
+      if (moreMatches) offset = payload.nextOffset;
+      moreFiles = payload.scan.hasMore;
+      nextScanOffset = payload.scan.nextOffset;
+    } while (moreMatches);
+    if (moreFiles) {
+      assert.ok(nextScanOffset !== undefined && nextScanOffset > scanOffset);
+      scanOffset = nextScanOffset;
+    }
+  } while (moreFiles);
+  assert.deepEqual(seen.slice(0, 2), ["current", "s0"]);
+  assert.equal(seen.length, 103);
+  assert.equal(new Set(seen).size, 103);
+});

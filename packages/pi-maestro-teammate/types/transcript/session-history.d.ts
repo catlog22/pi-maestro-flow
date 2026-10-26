@@ -33,6 +33,12 @@ export interface SessionHistoryInventoryEntry {
 export interface SessionHistoryInventory {
     generation?: number;
     entries: readonly SessionHistoryInventoryEntry[];
+    /** Absolute candidate offset of this supplied window (default 0). */
+    offset?: number;
+    /** Additional candidates exist beyond this window (default false). */
+    hasMore?: boolean;
+    /** Discovery itself was not budget-truncated (default true). */
+    complete?: boolean;
 }
 export type SessionHistoryInventoryValue = SessionHistoryInventory | readonly SessionHistoryInventoryEntry[];
 export type SessionHistoryInventoryProvider = (signal?: AbortSignal) => SessionHistoryInventoryValue | Promise<SessionHistoryInventoryValue>;
@@ -66,6 +72,8 @@ export interface SessionHistorySearchOptions extends SessionHistoryOptions {
     sort?: "source" | "relevance";
     /** Zero-based match offset within this fresh scan (not a snapshot cursor). */
     offset?: number;
+    /** Zero-based unique candidate offset; independent of match pagination. */
+    scanOffset?: number;
 }
 export type SessionHistoryReadOptions = SessionHistoryOptions;
 export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
@@ -104,6 +112,8 @@ interface ScanMetrics {
     bytesRead: number;
     truncated: boolean;
     omissions: readonly SessionHistoryOmission[];
+    omissionCounts: Readonly<Partial<Record<SessionHistoryOmissionReason, number>>>;
+    omissionsTruncated: boolean;
 }
 export interface SessionHistoryListResult extends ScanMetrics {
     version: typeof SESSION_HISTORY_VERSION;
@@ -124,10 +134,18 @@ export interface SessionHistorySearchResult extends ScanMetrics {
     generation?: number;
     query: string;
     matches: readonly SessionHistorySearchMatch[];
-    /** Total matches in this scan, independent of pagination. */
+    /** Matches in the current file window, not cumulative across scan pages. */
     matchCount: number;
+    matchCountRelation: "exact" | "lower_bound";
+    coverage: "complete" | "partial" | "failed";
+    /** Match pagination within the current file window only. */
     hasMore: boolean;
     nextOffset?: number;
+    scan: {
+        offset: number;
+        hasMore: boolean;
+        nextOffset?: number;
+    };
 }
 export interface SessionHistoryCompactionResult extends ScanMetrics {
     version: typeof SESSION_HISTORY_VERSION;
