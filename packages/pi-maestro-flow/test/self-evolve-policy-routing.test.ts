@@ -454,6 +454,11 @@ for (const variant of ["existing evidence", "rescued unknown", "legacy summary",
     setSelfEvolveDepositExecutorForTest(async (args) => {
       stages++;
       stagedArgs = [...args];
+      assert.equal(args.includes("--session"), false, "Pi provenance is not Workflow authority");
+      assert.equal(args.includes(raw.sessionId), false);
+      const expectedRefs = raw.evidence.filter((entry: { type: string }) => entry.type === "file").slice(0, 8).map((entry: { ref: string }) => entry.ref);
+      if (expectedRefs.length) assert.equal(args[args.indexOf("--evidence") + 1], expectedRefs.join(", "));
+      else assert.equal(args.includes("--evidence"), false);
       stagedContentFile = args[args.indexOf("--content-file") + 1];
       assert.notEqual(stagedContentFile, evidenceFile);
       const content = await readFile(stagedContentFile, "utf8");

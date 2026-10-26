@@ -87,6 +87,7 @@ import {
   sha256Hex,
   signalEvidenceContent,
   signalIsActionable,
+  stageEvidenceRefs,
   staleSuggestionFiles,
   suggestionsDirPath,
   summarizeText,
@@ -796,19 +797,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     signal: ResolvedSignal,
     evidenceFile: string,
   ): string[] | undefined {
-    if (signal.candidateType === "unknown") return undefined;
-    // Reuse the existing heuristic suggestion when present.
-    if (typeof signal.suggestion === "string" && signal.suggestion.length > 0) {
-      return buildStageCommandArgs(signal, evidenceFile);
-    }
-    // Synthesize for rescued signals.
-    if (signal.enrichmentStatus !== "semantic" && !signal.capturePolicyApplied) return undefined;
-    const type = signal.candidateType === "spec" ? "spec" : "knowhow";
-    const refs = (signal.evidence ?? []).map((e) => e.ref).slice(0, 8).join(", ");
-    const args = ["knowledge", "stage", type, signal.title, "--content-file", evidenceFile];
-    args.push("--session", signal.sessionId);
-    if (refs) args.push("--evidence", refs);
-    return args;
+    if (!resolvedIsActionable(signal)) return undefined;
+    return buildStageCommandArgs(signal, evidenceFile);
   }
 
   /** Load the most recent review records (reverse chronological). */
@@ -1252,7 +1242,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       evidenceFile: filePath,
       sessionId: signal.sessionId,
       runId: signal.runId,
-      evidenceRefs: signal.evidence.map((entry) => entry.ref),
+      evidenceRefs: stageEvidenceRefs(signal.evidence),
     });
   }
 

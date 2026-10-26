@@ -179,7 +179,7 @@ async function main(): Promise<void> {
   check("信号携带 project 字段（basename(cwd)）", sig.project === "ws", String(sig.project));
   check("信号携带继承模型 provider/id", sig.model === "test-provider/test-model", String(sig.model));
   check("suggestion 为命令模板（不执行）", typeof sig.suggestion === "string" && sig.suggestion.startsWith("maestro knowledge stage"));
-  check("suggestion 为可执行的 session 源模板（无死占位符）", sig.suggestion.includes("--session test-session-1") && sig.suggestion.includes("--content-file"), sig.suggestion);
+  check("suggestion 由 CLI 解析 Workflow 身份（不传 Pi id，无死占位符）", !sig.suggestion.includes("--session") && !sig.suggestion.includes("<session-id>") && sig.suggestion.includes("--content-file"), sig.suggestion);
   // Phase 2C: writing a signal must push a lightweight notify so the user sees
   // what self-evolve captured from the finished agent loop.
   const signalNotify = ctx.notifications.find((n) => n.message.includes("Self-evolve") && n.message.includes("/self-evolve signals"));
@@ -497,10 +497,10 @@ async function main(): Promise<void> {
   const firstArgs = executed[0]?.args ?? [];
   const firstSig = depSignals[0] as { title: string; sessionId: string };
   check(
-    "stage argv 结构化正确（knowledge stage <type> <title> --content-file <evidence> --session --json）",
+    "stage argv 结构化正确（正文 + 文件证据，由 CLI 解析身份）",
     firstArgs[0] === "knowledge" && firstArgs[1] === "stage" && firstArgs[2] === "knowhow"
       && firstArgs[3] === firstSig.title && firstArgs.includes("--content-file")
-      && firstArgs.includes("--session") && firstArgs.includes(firstSig.sessionId)
+      && !firstArgs.includes("--session") && !firstArgs.includes(firstSig.sessionId)
       && firstArgs.includes("--json"),
     JSON.stringify(firstArgs),
   );

@@ -94,7 +94,7 @@ TUI 面板中 `mode` 行直接编辑（`Enter` 输入后 `Ctrl+S` 保存）。
 
 **执行与审计**：
 
-- stage 命令由信号重建为结构化 argv（`knowledge stage <type> "<title>" --content-file <evidence.md> --session <sid>|--run <rid> --evidence <refs>`，与人工 `suggestion` 模板同源——session-first，run 兜底；执行时追加 `--json` 保证 `candidate_id` 解析可靠），经 **cross-spawn** 执行 `maestro` CLI（Windows 上 `maestro.cmd` 安全解析，与 `session/cli-adapter.ts` `defaultRunner` 同范式）：**60s 硬超时** + 进程树终止（win32 `taskkill /T /F`）、**1MB 输出上限**（超限即终止）、stdout/stderr error 处理器、监听器 cleanup；
+- stage 命令由信号重建为结构化 argv（`knowledge stage <type> "<title>" --content-file <content.md> [--run <rid>] --evidence <file-refs>`；Pi chat ID 只用于溯源，Workflow 写权限由 CLI 解析，已知 Run 仍显式绑定；文件证据筛选后再限 8 条，不将工具名作为文件引用。执行时追加 `--json` 保证 `candidate_id` 解析可靠），经 **cross-spawn** 执行 `maestro` CLI（Windows 上 `maestro.cmd` 安全解析，与 `session/cli-adapter.ts` `defaultRunner` 同范式）：**60s 硬超时** + 进程树终止（win32 `taskkill /T /F`）、**1MB 输出上限**（超限即终止）、stdout/stderr error 处理器、监听器 cleanup；
 - 每次尝试（成功与失败）都写一条 deposit 审计记录（`~/.maestro/self-evolve/deposits/<date>.jsonl`），含 signal id、title、type、完整命令、退出码、解析出的 `stagedId`（`KDC-*`）、错误摘要——**绝不静默失败**；
 - **fail-closed 前置校验**：信号对应 evidence 文件（`evidence/<se-id>.md`）缺失时**不执行** stage，ledger 直接记 `exitCode=-1 + error`；signal id 不匹配 `se-[0-9a-f]{12}`（手改 JSONL 防御）同样拒绝并记录；
 - **幂等去重**：已成功沉淀（`exitCode=0`）的信号从 ledger 种子化去重集合，二次 review 自动跳过（跨重启持久）；失败/缺失/异常的记录可重试；
@@ -166,7 +166,7 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
     { "type": "file", "ref": "src/foo.ts:123", "role": "modified" },
     { "type": "tool", "ref": "read" }
   ],
-  "suggestion": "maestro knowledge stage knowhow \"<title>\" --content-file ~/.maestro/self-evolve/evidence/se-3f2a1b9c0d4e.md --session <session-id> --evidence \"src/foo.ts:123, read\"",
+  "suggestion": "maestro knowledge stage knowhow \"<title>\" --content-file ~/.maestro/self-evolve/evidence/se-3f2a1b9c0d4e.md --evidence \"src/foo.ts:123\"",
   "trigger": { "reason": "threshold" }
 }
 ```
@@ -192,7 +192,7 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
   "candidateType": "knowhow",
   "source": "agent_end",
   "sessionId": "20260807-xxxx",
-  "command": "maestro knowledge stage knowhow \"…\" --content-file … --session …",
+  "command": "maestro knowledge stage knowhow \"…\" --content-file … --evidence …",
   "exitCode": 0,
   "stagedId": "KDC-…",
   "error": "…（失败时）"

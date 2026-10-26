@@ -648,6 +648,7 @@ export interface SelfEvolveSignal {
   /** Phase 2A is dry-run only — never auto-applied. */
   dryRun: true;
   createdAt: string;
+  /** Pi chat identity for trace joins, not a Maestro Workflow Session id. */
   sessionId: string;
   /** Project the signal was collected in (`basename(cwd)`). */
   project?: string;
@@ -793,15 +794,20 @@ function renderSopFrontmatterHint(toolCalls: ToolCallEvidence[] | undefined): st
  * Phase 2A review finding: the old template carried literal `<run-id>` /
  * `<evidence-file>` placeholders with no backing artifact, so copy-paste
  * always failed. The extension now writes a real evidence file at write time
- * and prefers the fully-executable session-source form
- * (`--session <sid> --evidence <refs>`); the run-source form is used only
- * when a run id is actually known. `unknown` candidate types produce no
- * suggestion (they are not actionable).
+ * and lets the CLI resolve Workflow write authority. Pi chat ids are trace
+ * identities, never `--session` values. An explicit Maestro run stays bound.
+ * `unknown` candidate types produce no suggestion (they are not actionable).
  */
 export function buildSuggestion(
   candidateType: CandidateType,
   title: string,
-  opts: { evidenceFile?: string; sessionId?: string; runId?: string; evidenceRefs?: readonly string[] } = {},
+  opts: {
+    evidenceFile?: string;
+    /** Pi trace identity retained for legacy callers, never a CLI binding. */
+    sessionId?: string;
+    runId?: string;
+    evidenceRefs?: readonly string[];
+  } = {},
 ): string | undefined {
   if (candidateType === "unknown") return undefined;
   const type = candidateType === "spec" ? "spec" : "knowhow";
@@ -809,15 +815,8 @@ export function buildSuggestion(
   const refs = (opts.evidenceRefs ?? []).slice(0, 8).join(", ");
   const evidenceFile = opts.evidenceFile ?? "<evidence-file>";
   const evidenceArg = refs ? ` --evidence "${refs}"` : "";
-  if (opts.sessionId) {
-    return `maestro knowledge stage ${type} "${escapedTitle}" --content-file ${evidenceFile} --session ${opts.sessionId}${evidenceArg}`;
-  }
-  if (opts.runId) {
-    return `maestro knowledge stage ${type} "${escapedTitle}" --content-file ${evidenceFile} --run ${opts.runId}${evidenceArg}`;
-  }
-  // No identity resolvable at write time — keep the template explicit about
-  // what a human/agent must supply (session-source is the documented fallback).
-  return `maestro knowledge stage ${type} "${escapedTitle}" --content-file ${evidenceFile} --session <session-id>${evidenceArg}`;
+  const runArg = opts.runId ? ` --run ${opts.runId}` : "";
+  return `maestro knowledge stage ${type} "${escapedTitle}" --content-file ${evidenceFile}${runArg}${evidenceArg}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,10 +1320,15 @@ export function depositFileName(date = new Date()): string {
   return `${date.getFullYear()}-${month}-${day}.jsonl`;
 }
 
+/** Tool names describe the trace; only file references can back CLI snapshots. */
+export function stageEvidenceRefs(evidence: readonly EvidenceRef[] = []): string[] {
+  return evidence.filter((entry) => entry.type === "file").slice(0, 8).map((entry) => entry.ref);
+}
+
 /**
  * Build the structured argv for the auto-stage command, mirroring the
- * human-facing `suggestion` template (same identity/evidence wiring —
- * session-first, run fallback — so manual and automatic paths agree).
+ * human-facing `suggestion` template. Only known Maestro Run ids are bound;
+ * otherwise the CLI resolves write authority independently of Pi trace ids.
  * Returns undefined for non-actionable signals (`unknown` candidate type).
  * argv avoids shell quoting — spawn passes arguments directly.
  */
@@ -1334,13 +1338,9 @@ export function buildStageCommandArgs(
 ): string[] | undefined {
   if (signal.candidateType === "unknown") return undefined;
   const type = signal.candidateType === "spec" ? "spec" : "knowhow";
-  const refs = (signal.evidence ?? []).map((entry) => entry.ref).slice(0, 8).join(", ");
+  const refs = stageEvidenceRefs(signal.evidence).join(", ");
   const args = ["knowledge", "stage", type, signal.title, "--content-file", evidenceFile];
-  if (signal.sessionId) {
-    args.push("--session", signal.sessionId);
-  } else if (signal.runId) {
-    args.push("--run", signal.runId);
-  }
+  if (signal.runId) args.push("--run", signal.runId);
   if (refs) args.push("--evidence", refs);
   return args;
 }
