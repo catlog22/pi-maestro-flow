@@ -2,7 +2,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import {
   canonicalizeBrowserOpenOptions,
   type BrowserCapture,
@@ -105,6 +105,15 @@ export const BrowserParams = Type.Object({
   ],
 });
 
+// Action-specific requirements (run needs code, pair needs request_id plus a
+// six-digit code) are enforced at runtime in execute(), not in the model-facing
+// schema. The host validates against the full BrowserParams; the model-facing
+// declaration must omit conditionals (allOf/if/then/not), which Gemini and xAI
+// function declarations reject with 400. Same precedent as TodoModelParams in
+// src/extension/schemas.ts.
+const { allOf: _browserConditions, ...browserModelSchema } = BrowserParams as typeof BrowserParams & { allOf?: unknown };
+export const BrowserModelParams = Type.Unsafe<Static<typeof BrowserParams>>(browserModelSchema);
+
 export interface BrowserToolDetails {
   action: "open" | "close" | "run" | "guide" | "status" | "pair" | "pick" | "start_video" | "stop_video" | "video_chapter" | "video_show_actions" | "video_hide_actions";
   name?: string;
@@ -124,8 +133,8 @@ export interface BrowserToolDetails {
   diagnostics?: BrowserRunDiagnostics;
 }
 
-export type BrowserToolDefinition = ToolDefinition<typeof BrowserParams, BrowserToolDetails> & {
-  execute: ToolDefinition<typeof BrowserParams, BrowserToolDetails>["execute"] & (
+export type BrowserToolDefinition = ToolDefinition<typeof BrowserModelParams, BrowserToolDetails> & {
+  execute: ToolDefinition<typeof BrowserModelParams, BrowserToolDetails>["execute"] & (
     (id: string, params: never, signal: AbortSignal, onUpdate: undefined, ctx: ExtensionContext) => Promise<AgentToolResult<BrowserToolDetails>>
   );
 };
@@ -179,7 +188,7 @@ export function createBrowserTool(injectedManager?: BrowserManagerLike): Browser
       "Optional browser-bridge extension: install with /install browser-bridge, then explicitly open app.channel='extension' with app.target to borrow an existing tab or url to create an owned tab. Each named entry has an opaque owner and a lease on its fixed tabId. browser.pages secondary operation targets lazily claim; close releases all borrowed claims and closes owned tabs only after terminal. tab_busy means another owner/draining operation holds the resource. Batches reserve their target; global mutations coordinate across connections. Proven opener newTabs carry owned leases; unrelated new tabs are not owned. Cookies/login state are not isolated. The limited adapter supports URL/title, goto/evaluate, raw CDP and batch, cookies, tab listing, and CDP screenshot. Disconnects and unsupported calls fail closed with no managed-browser fallback. After an interrupted run, wait for all command terminals and host operations to drain, then explicitly open the same named entry to revalidate its fixed tab/generation before running again. open rejects while draining; revalidation preserves the owned tab and never replays interrupted operations.",
       "Let the user point at a UI element with action:pick — it injects a selector toolbar into the named tab's page (works on managed/profile/cdp and extension channels): hover highlights the element and shows its React/Vue component name, click selects, Ctrl/Cmd/Shift adds to the selection, [Send element] pastes the capture(s) into the user's input box, [Send errors] pastes buffered console.error output (up to 100), Esc exits. Captures include tag, CSS selector, trimmed outerHTML, and component source file:line when the page runs a dev build (production builds yield component names only). The tool call blocks until the user sends or exits; you do NOT receive the captures unless the user sends them.",
     ],
-    parameters: BrowserParams,
+    parameters: BrowserModelParams,
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<BrowserToolDetails>> {
       const name = params.name?.trim() || "main";
