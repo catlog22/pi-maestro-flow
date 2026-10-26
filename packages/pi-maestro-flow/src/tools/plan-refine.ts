@@ -426,7 +426,15 @@ export async function openRefinePanel(
           },
         }
       : {}),
-    ...(lastTurn ? { latestOutput: lastTurn.output, latestRole: lastTurn.role } : {}),
+    ...(lastTurn
+      ? {
+          latestOutput: lastTurn.output,
+          latestRole: lastTurn.role,
+          // plan.ts branches on this to decide whether the role returns a full
+          // draft (optimizer) or discussion feedback.
+          latestAppliesAs: REFINE_ROLES[lastTurn.role].appliesAs,
+        }
+      : {}),
   };
 }
 

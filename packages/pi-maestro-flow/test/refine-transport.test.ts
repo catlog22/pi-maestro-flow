@@ -188,6 +188,32 @@ test("the business terminal reaches the mirror even after the local overlay clos
   }
 });
 
+test("an optimizer turn reports the draft disposition plan.ts branches on", async () => {
+  const h = harness();
+  const overlay = overlayUi();
+  try {
+    const pending = openRefinePanel(stubPi(), refineContextWith(overlay.ui), { markdown: PLAN, revision: 15 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const session = createRefineSession("reviewer", "p/m");
+    const optimizerTurn = {
+      role: "optimizer" as const,
+      modelLabel: "p/m",
+      userInput: "",
+      output: "# Revised plan\n\n- one\n- two\n- three",
+      createdAt: new Date().toISOString(),
+    };
+    overlay.close({ action: "apply", session: { ...session, turns: [optimizerTurn] } });
+    const outcome = await pending;
+    assert.equal(outcome.action, "apply");
+    // plan.ts writes the PlanStore only when this is "draft"; a missing value
+    // silently turns an optimized plan into discussion feedback.
+    assert.equal(outcome.latestAppliesAs, "draft");
+    assert.equal(outcome.latestRole, "optimizer");
+  } finally {
+    h.dispose();
+  }
+});
+
 test("a failing transport never removes the local refine path", async () => {
   const events: RefineTransportEvent[] = [];
   const overlay = overlayUi();
