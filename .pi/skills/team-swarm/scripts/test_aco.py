@@ -94,8 +94,9 @@ def _deep_merge(base: dict, overrides: dict):
 
 
 def write_ant(session: Path, iteration: int, ant_idx: int,
-              path: list, self_score: float = 0.6, self_confidence: float = 0.7) -> Path:
-    artifacts = session / "artifacts"
+              path: list, self_score: float = 0.6, self_confidence: float = 0.7,
+              outputs: Optional[Path] = None) -> Path:
+    artifacts = outputs if outputs is not None else session / "artifacts"
     artifacts.mkdir(exist_ok=True)
     decisions = [
         {"from": path[i], "to": path[i + 1], "rationale": "r",
@@ -103,6 +104,8 @@ def write_ant(session: Path, iteration: int, ant_idx: int,
         for i in range(len(path) - 1)
     ]
     art = {
+        **({"_meta": {"kind": "swarm-ant-result", "schema": "swarm-ant-result/1.0",
+                       "role": "evidence"}} if outputs is not None else {}),
         "schema_version": "1.0",
         "ant_id": f"ANT-{iteration}-{ant_idx}",
         "iteration": iteration,
@@ -286,6 +289,26 @@ def test_full_pipeline_3_iterations():
         check("report: iterations_completed == 3", rep["iterations_completed"] == 3)
 
 
+def test_run_scoped_outputs():
+    section("aco.py — v3 Run-scoped outputs and metadata")
+
+    with tempfile.TemporaryDirectory() as td:
+        run_dir = Path(td) / "run"
+        session = run_dir / "work" / "team"
+        write_config(session)
+        run_args = ("--run-dir", str(run_dir))
+        run_aco(session, *run_args, "init")
+        run_aco(session, *run_args, "select", "--iter", "1")
+        write_ant(session, 1, 1, ["a", "b"], outputs=run_dir / "outputs")
+        up = run_aco(session, *run_args, "update", "--iter", "1")
+        check("v3 update reads outputs/ ant", up["n_ants_processed"] == 1)
+        rep = run_aco(session, *run_args, "report")
+        check("v3 report self-describes its artifact",
+              rep["_meta"] == {"kind": "swarm-report", "schema": "swarm-report/1.0",
+                               "role": "attachment"})
+        check("v3 report includes best solution", rep["best"]["ant_id"] == "ANT-1-1")
+
+
 # ---------------------------------------------------------------------------
 # CLI integration — target_score convergence
 # ---------------------------------------------------------------------------
@@ -454,6 +477,7 @@ def main():
     test_pheromone_unit()
     test_scoring_unit()
     test_full_pipeline_3_iterations()
+    test_run_scoped_outputs()
     test_target_score_convergence()
     test_hallucination_flagging()
     test_invalid_artifacts()

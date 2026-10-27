@@ -3,7 +3,11 @@ name: maestro-companion
 description: "Quick execution for small tasks — minimal run lifecycle (start + done) with evidence recording. Full LLM capability, scoped to mechanically clear tasks. Arguments: <intent> [-y]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: false
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>

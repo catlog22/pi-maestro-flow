@@ -2,18 +2,23 @@
 
 ## Inputs
 
-- `swarm-config.json` from Phase 1 (in-memory or already written to candidate session path)
-- `session_id` already computed (`TS-<slug>-<date>`)
-- `skill_root` = `<project>/.claude/skills/team-swarm`
+- `swarm-config.json` from Phase 1 (in memory until the exact Run directory is resolved)
+- canonical `session_id` from the birth packet or self-start receipt (not a separate `TS-*` locator)
+- `skill_root` = directory containing the active `team-swarm/SKILL.md` (do not assume project cwd or a particular mirror)
 
 ## Workflow
+
+### Step 0: Resolve Run authority
+
+Perform the coordinator role's **Run Lifecycle Integration** before creating `work/team` or writing config. Obtain the exact `session_id`, `run_id`, and `run_dir` from the birth packet or receipt; do not infer a Run path from a local sidecar.
 
 ### Step 1: Resolve paths
 
 ```
-project_root = Bash("pwd")
-skill_root = "<project_root>/.claude/skills/team-swarm"
-session_path = "<project_root>/{run_dir}/work/team/"
+run_dir = <exact path returned by Run birth packet or team-session.json.run.run_dir>
+skill_root = <resolved directory containing this SKILL.md>
+session_path = Path(run_dir) / "work" / "team"
+# Do not prepend pwd to run_dir: it may already be absolute.
 ```
 
 ### Step 2: Create session directory tree
@@ -52,7 +57,7 @@ Saved at `<session_path>/role-binding.json` — workers resolve their role.md fr
 ### Step 6: Call aco.py init
 
 ```
-Bash: python <skill_root>/scripts/aco.py --session <session_path> init
+Bash: python <skill_root>/scripts/aco.py --session <session_path> --run-dir <run_dir> init
 ```
 
 Parse stdout JSON. On `status: "error"`:
@@ -85,7 +90,7 @@ On success, capture:
   "completion_action": "interactive",
   "created_at": "<iso8601>",
   "updated_at": "<iso8601>",
-  "run": { "run_id": "<run-id>", "run_dir": "<run-dir>" }
+  "run": { "session_id": "<canonical-session-id>", "run_id": "<run-id>", "run_dir": "<run-dir>" }
 }
 ```
 

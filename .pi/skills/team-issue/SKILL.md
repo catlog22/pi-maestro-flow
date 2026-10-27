@@ -3,7 +3,16 @@ name: team-issue
 description: "Unified team skill for issue resolution. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team issue\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  contract_version: 2.1
+  consumes: []
+  produces:
+    - {path: outputs/solutions, kind: issue-solutions-collection, schema: issue-solutions-collection/1.0, role: attachment, required: false}
+    - {path: outputs/audits, kind: issue-audits-collection, schema: issue-audits-collection/1.0, role: primary, required: false}
+    - {path: outputs/queue, kind: issue-queue-collection, schema: issue-queue-collection/1.0, role: attachment, required: false}
+    - {path: outputs/builds, kind: issue-builds-collection, schema: issue-builds-collection/1.0, role: attachment, required: false}
+  gates: {entry: [], exit: []}
 ---
 
 <teammate_contract>
@@ -134,7 +143,7 @@ Execute built-in Phase 1 (task discovery, owner=<role>-<N>) -> role Phase 2-4 ->
 ## Session Directory
 
 ```
-{run_dir}/work/team/
+{run_dir}/work/team/            # Coordination only; outputs/ is a sibling under {run_dir}
 ├── team-session.json                    # Session metadata + pipeline + fix_cycles
 ├── task-analysis.json              # Coordinator analyze output
 ├── .msg/

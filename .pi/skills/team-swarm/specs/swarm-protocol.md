@@ -46,11 +46,11 @@ Master protocol document for team-swarm: defines how the LLM coordinator and Pyt
 
 ```
 [Coordinator] init phase
-  └─> python aco.py init --config {run_dir}/work/team/swarm-config.json
+  └─> python aco.py --session {run_dir}/work/team --run-dir <run_dir> init
        └─> writes pheromone/current.json + task-space.json
 
 [Coordinator] iteration k (k = 1..K):
-  ├─> python aco.py select --iter k
+  ├─> python aco.py --session {run_dir}/work/team --run-dir <run_dir> select --iter k
   │    └─> returns N ant assignments (paths to explore)
   ├─> TaskCreate × N ant tasks
   ├─> spawn N × team-worker(ant) in background
@@ -58,15 +58,15 @@ Master protocol document for team-swarm: defines how the LLM coordinator and Pyt
 
 [Callback] all ants done → handleIterationComplete
   ├─> (optional) spawn scorer worker → verified_scores.json
-  ├─> python aco.py update --iter k
+  ├─> python aco.py --session {run_dir}/work/team --run-dir <run_dir> update --iter k
   │    └─> reads {run_dir}/outputs/ant-k-*.json + verified_scores
   │    └─> updates pheromone + elite + history
-  ├─> python aco.py converged
+  ├─> python aco.py --session {run_dir}/work/team --run-dir <run_dir> converged
   │    └─> {converged: true|false, reason: ...}
   └─> converged → Phase 4; else → iteration k+1
 
 [Coordinator] Phase 4: converge
-  ├─> python aco.py report → best.json
+  ├─> python aco.py --session {run_dir}/work/team --run-dir <run_dir> report → stdout JSON saved as outputs/swarm-report.json
   ├─> spawn analyst worker → best-solution.md
   └─> completion action (Archive/Keep/Export)
 ```
@@ -85,7 +85,7 @@ All scripts MUST:
 | `select --iter k` | pheromone/current.json, swarm-config.json | `{iteration, assignments: [{ant_id, path_hints, ...}]}` | none |
 | `update --iter k` | {run_dir}/outputs/ant-k-*.json, optional verified_scores.json | `{iteration, mean_score, best_score, delta, elite_updated}` | writes pheromone/current.json (overwrite) + pheromone/history/k.json + trails/k.jsonl + best.json |
 | `converged` | history/, best.json, config | `{converged: bool, reason: str, metrics: {...}}` | none |
-| `report` | best.json, history/ | full JSON: `{best, top_k, convergence_curve, ...}` | none |
+| `report` | best.json, history/ | full JSON: `{_meta: {kind: swarm-report, schema: swarm-report/1.0, role: attachment}, best, top_k, convergence_curve, ...}` | none |
 
 ## Data Flow Boundaries
 

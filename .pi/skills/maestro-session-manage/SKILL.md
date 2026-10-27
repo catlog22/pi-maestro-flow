@@ -3,7 +3,11 @@ name: maestro-session-manage
 description: "Manage a v3 Session — inspect status/resume-view, review knowledge candidates, complete, archive/unarchive Arguments: [--session <session_id>] [--complete|--archive|--unarchive|--knowledge] [-y] [--skip-knowledge]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>
@@ -91,7 +95,7 @@ Note: maestro-next suggests `--complete` when 'Tests green + active session'. Or
 
 **2b. Knowledge closeout**
 
-As completion owner, execute `~/.maestro/ref/knowledge-closeout.md`: Review → Refresh → Present → Authorize → Execute → Verify. Review the exact Session with `--json`; refresh only missing/stale receipts within caller authority. Present candidate IDs/content/evidence/matches/recommendations, obtain explicit human relationship and publication decisions (or verify matching prior authorization), then resolve confirmed relationships and promote fixed approved IDs one at a time with `--candidate`. `-y`, machine advice, and accepted decisions are not publication approval.
+As completion owner, execute `~/.maestro/ref/knowledge-closeout.md`: Review → Refresh → Present → Authorize → Execute → Verify. Review the exact Session with `--json`; refresh only missing/stale receipts within caller authority. Present candidate IDs/content/evidence/matches/recommendations, obtain explicit human relationship and publication decisions (or verify matching prior authorization), then execute approved adjudication/publication inline with `promote --resolve`, or use `promote --candidate` for already eligible fixed approved IDs, one at a time. Relationship-only authorization uses the deprecated `review --resolve` fallback without publication; material changes require re-presentation and re-confirmation. `-y`, machine advice, and accepted decisions are not publication approval.
 
 With `--skip-knowledge`, read the review/backlog counts, report deliberate deferral, and proceed to 2c without refresh/resolution/promotion. Zero candidates, rejection, deferral, or unresolved backlog do not block otherwise valid Session completion. Never fabricate duplicate dispositions to clear rejected/deferred items.
 
@@ -168,7 +172,7 @@ Status: DONE
 | W001 | warning | No knowledge candidates found | Proceed |
 | W002 | warning | No verify/review run in session — gate check skipped | Consider running verify before completing |
 | W003 | warning | Candidate backlog left pending | Review later with `maestro knowledge review {session_id}` |
-| W004 | warning | Reconciliation review remains unresolved | Completion may continue; promotion stays blocked until `maestro knowledge review --resolve` |
+| W004 | warning | Reconciliation review remains unresolved | Completion may continue; follow the shared closeout protocol for explicit confirmation before `promote --resolve` (deprecated `review --resolve` only for relationship-only authorization) |
 </error_codes>
 
 <success_criteria>

@@ -3,7 +3,14 @@ name: team-arch-opt
 description: "Unified team skill for architecture optimization. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team arch-opt\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  contract_version: 2.1
+  consumes: []
+  produces:
+    - {path: outputs/branches, kind: architecture-branches-collection, schema: architecture-branches-collection/1.0, role: attachment, required: false}
+    - {path: outputs/pipelines, kind: architecture-pipelines-collection, schema: architecture-pipelines-collection/1.0, role: attachment, required: false}
+  gates: {entry: [], exit: []}
 ---
 
 <teammate_contract>

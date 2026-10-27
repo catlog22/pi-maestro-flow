@@ -3,7 +3,11 @@ name: maestro
 description: "Intent-to-chain planner over the canonical Session/Run lifecycle Arguments: <intent> [-y] [-c] [--amend] [--dry-run]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro run-control
 disable-model-invocation: false
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>

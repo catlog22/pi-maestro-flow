@@ -3,7 +3,11 @@ name: maestro-odyssey
 description: "Long-running iterative cycle — one entry, seven modes (debug|improve|planex|review|security|defensive|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next Arguments: <intent> --mode debug|improve|planex|review|security|defensive|ui [-y] [-c]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>

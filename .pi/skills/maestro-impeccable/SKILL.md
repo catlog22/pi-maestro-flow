@@ -3,7 +3,11 @@ name: maestro-impeccable
 description: "Use when designing, reviewing, refining, fixing, or codifying frontend UI with Maestro's self-contained Impeccable core Arguments: [command] [target] | hooks <action> | doctor | pin|unpin <command> | --codify <path>"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>

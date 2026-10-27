@@ -5,12 +5,13 @@
 ### Step 1: Call aco.py report
 
 ```
-Bash: python <skill_root>/scripts/aco.py --session {run_dir}/work/team report
+Bash: python <skill_root>/scripts/aco.py --session {run_dir}/work/team --run-dir <run_dir> report
 ```
 
 Parse stdout JSON. Expected:
 ```json
 {
+  "_meta": {"kind": "swarm-report", "schema": "swarm-report/1.0", "role": "attachment"},
   "status": "ok",
   "best": { ant_id, iteration, path, score, candidate_solution, evidence, ... },
   "top_k": [<top 5 trails>],
@@ -20,7 +21,7 @@ Parse stdout JSON. Expected:
 }
 ```
 
-Save full report to `{run_dir}/outputs/swarm-report.json` (raw data for analyst).
+Save the complete stdout JSON, including `_meta`, to `{run_dir}/outputs/swarm-report.json` (raw data for analyst). Do not wrap, strip, or replace the metadata.
 
 ### Step 2: Spawn analyst worker
 
@@ -30,6 +31,7 @@ role: analyst
 role_spec: <skill_root>/roles/analyst/role.md
 session: <session_path>
 session_id: <run-id>
+run_dir: <exact run_dir from the birth packet or team-session.json.run.run_dir>
 team_name: swarm
 requirement: synthesize swarm results into human-readable best-solution.md
 inner_loop: false
@@ -49,7 +51,7 @@ STOP. Resume on analyst callback.
 
 ### Step 3: On analyst callback
 
-Verify `{run_dir}/outputs/best-solution.md` exists.
+Verify `{run_dir}/outputs/best-solution.md` exists and begins with `kind: swarm-best-solution`, `schema: swarm-best-solution/1.0`, and `role: primary` YAML frontmatter. Run `maestro run check <run_id> --session <session_id> --json` and repair any output contract blockers before completion.
 
 If missing -> AskUserQuestion (skip synthesis / retry analyst).
 
@@ -141,7 +143,7 @@ ask user ({
 
 | Failure | Action |
 |---------|--------|
-| `aco.py report` fails | Read best.json directly + manual top-K from trails/ |
-| Analyst worker crashes | Generate minimal best-solution.md from best.json template |
+| `aco.py report` fails | Stop before analyst dispatch; keep Run unsealed and team paused, record stderr, repair the script/state, then retry `report`. Do not substitute an untyped manual report for required `outputs/swarm-report.json`. |
+| Analyst worker crashes | Retry once; if synthesizing a minimal best-solution.md from best.json is explicitly chosen, include the required `swarm-best-solution/1.0` primary YAML frontmatter and verify via `run check` before completion. |
 | best.json missing | Pipeline ran but no successful ant - report failure, keep session for inspection |
 | Run Another Round chosen but max_iterations already at limit | user prompt to raise the cap before continuing |

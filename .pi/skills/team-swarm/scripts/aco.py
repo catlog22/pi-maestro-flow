@@ -247,9 +247,11 @@ def cmd_update(args: argparse.Namespace) -> None:
     if scoring_cfg.get("mode") in ("script", "hybrid"):
         rule_path = scoring_cfg.get("script_path")
         if rule_path:
-            full = Path(args.session).parent.parent / rule_path if not Path(rule_path).is_absolute() else Path(rule_path)
-            if full.exists():
-                script_scorer = ScriptScorer(full)
+            # Relative scoring scripts belong to the project cwd, not the Run's work/team parent.
+            full = Path(rule_path) if Path(rule_path).is_absolute() else Path.cwd() / rule_path
+            if not full.is_file():
+                _fail(2, f"scoring script not found: {full}")
+            script_scorer = ScriptScorer(full)
     fallback = FallbackScorer(scoring_cfg.get("self_score_discount", 0.5))
     verified_scores = load_verified_scores(paths.scores / f"iter-{args.iter}-scores.json")
 
@@ -438,6 +440,11 @@ def cmd_report(args: argparse.Namespace) -> None:
         })
 
     _emit({
+        "_meta": {
+            "kind": "swarm-report",
+            "schema": "swarm-report/1.0",
+            "role": "attachment",
+        },
         "status": "ok",
         "command": "report",
         "best": best,

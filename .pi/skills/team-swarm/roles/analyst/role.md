@@ -49,9 +49,14 @@ Workflow:
 
 ### 3.1 Structure the report
 
-Layout for `best-solution.md`:
+Layout for `best-solution.md` (the frontmatter is required by the Run output contract; keep it at byte 0):
 
 ```markdown
+---
+kind: swarm-best-solution
+schema: swarm-best-solution/1.0
+role: primary
+---
 # Swarm Result — <objective_short_form>
 
 ## Best Solution

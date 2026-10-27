@@ -3,7 +3,11 @@ name: maestro-merge
 description: "Merge session worktree branch back to main Arguments: --session <session_id> [--force] [--dry-run] [--no-cleanup] [--continue]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>

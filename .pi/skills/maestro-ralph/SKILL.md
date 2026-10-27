@@ -3,7 +3,11 @@ name: maestro-ralph
 description: "Closed-loop policy over the canonical Session/Run chain Arguments: <intent> [-y] [-c] [--amend]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro run-control
 disable-model-invocation: false
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <teammate_contract>

@@ -3,7 +3,15 @@ name: team-review
 description: "Unified team skill for code review. 3-role pipeline: scanner, reviewer, fixer. Triggers on team-review."
 allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  contract_version: 2.1
+  consumes: []
+  produces:
+    - {path: outputs/scan, kind: review-scan-collection, schema: review-scan-collection/1.0, role: attachment, required: false}
+    - {path: outputs/review, kind: review-findings-collection, schema: review-findings-collection/1.0, role: primary, required: false}
+    - {path: outputs/fix, kind: review-fix-collection, schema: review-fix-collection/1.0, role: attachment, required: false}
+  gates: {entry: [], exit: []}
 ---
 
 <teammate_contract>

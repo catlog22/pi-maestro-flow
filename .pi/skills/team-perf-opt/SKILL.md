@@ -3,7 +3,14 @@ name: team-perf-opt
 description: "Unified team skill for performance optimization. Coordinator orchestrates pipeline, workers are team-worker agents. Supports single/fan-out/independent parallel modes. Triggers on \"team perf-opt\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  contract_version: 2.1
+  consumes: []
+  produces:
+    - {path: outputs/branches, kind: performance-branches-collection, schema: performance-branches-collection/1.0, role: attachment, required: false}
+    - {path: outputs/pipelines, kind: performance-pipelines-collection, schema: performance-pipelines-collection/1.0, role: attachment, required: false}
+  gates: {entry: [], exit: []}
 ---
 
 <teammate_contract>

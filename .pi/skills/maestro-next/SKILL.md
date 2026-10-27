@@ -3,7 +3,11 @@ name: maestro-next
 description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro and /maestro-ralph (multi-step manual/orchestrated). Pure router, never runs execution loops itself Arguments: <intent> [-y]"
 allowed-tools: Read Write Edit Bash Glob Grep maestro run-control
 disable-model-invocation: false
-session-mode: none
+session-mode: run
+contract:
+  discovery: self-described
+  consumes: []
+  produces: []
 ---
 
 <required_reading>

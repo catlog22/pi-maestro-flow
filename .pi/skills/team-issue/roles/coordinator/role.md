@@ -97,9 +97,10 @@ TEXT-LEVEL ONLY. No source code reading.
 
 ## Phase 2: Create Team + Initialize Session
 
+0. Resolve the exact Run through **Run Lifecycle Integration** below before any Run-scoped directory, state, or team creation. Keep its locator in memory until the first `team-session.json` write.
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.claude/skills/team-issue`
+   - `skill_root` = directory containing the active `team-issue/SKILL.md` (not a hardcoded mirror path)
 2. Generate session ID: `TISL-<issue-slug>-<date>`
 3. Create session folder structure:
    ```
@@ -119,20 +120,20 @@ TEXT-LEVEL ONLY. No source code reading.
 
 ### Run Lifecycle Integration
 
-After session folder creation and before role-spec generation:
+Before Phase 2 Step 1 and any Run-scoped write:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; every revision comes from the immediately preceding receipt and `--actor` carries the authorized identity (`--participant` defaults to it; the CLI derives a stable request ID per distinct invocation):
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), retain them until the first `team-session.json` write and skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; every revision comes from the immediately preceding receipt and `--actor` carries the authorized identity (`--participant` defaults to it; the CLI derives a stable request ID per distinct invocation):
    ```bash
    maestro session open "<task summary>" --id <slug> --actor {actor_id} --json
    maestro session chain insert --session {session_id} --step-id {step_id} --command team-issue --arg "<task summary>" --actor {actor_id} --expected-orchestration-revision {open_orchestration_revision} --json
    maestro run next --session {session_id} --actor {actor_id} --expected-orchestration-revision {insert_orchestration_revision} --json
    ```
    - Slug format: `YYYYMMDD-team-issue-<topic>` (ASCII, ≤64 chars)
-   - Store returned `run_id` and `run_dir` in `team-session.json`:
+   - Store returned canonical `session_id`, `run_id`, and `run_dir` in `team-session.json`:
      ```json
-     "run": { "run_id": "<id>", "run_dir": "<path>" }
+     "run": { "session_id": "<canonical-session-id>", "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, follow the receipt's structured `continuation`; allocate another Run only through a freshly fenced `run next` after Runtime reports a pending step. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
+2. **Resume**: Resolve the exact `session_id` + `run_id` + `run_dir` from the birth packet or `team-session.json.run`; output files are not Run locators. Use `maestro run check <run_id> --session <session_id> --json` for status/output blockers, then `maestro run brief <run_id> --session <session_id> --json` for the structured `continuation`. If sealed, follow the brief and allocate another Run only through a freshly fenced `run next` when a step is pending. If the locator is missing or inconsistent, fail closed; do not mint a duplicate Run.
 
 ## Phase 3: Create Task Chain
 

@@ -20,6 +20,8 @@ When the user names knowledge such as `knowhow`, `spec`, `reference`, `参考`, 
 
 Search and automatic injection are exposure, not consumption; `knowledge_context.run.knowledge_ids` lists consumed IDs, not their full text. The gate is complete when the search response has been inspected and relevant governing entries are available in full. If only an ID or summary survives compaction, load it again. An empty result permits normal discovery only after inspection. Follow any recovery hint and retry first.
 
+**Low-hit knowledge follow-up**: when `search` returns `knowledgeCaptureHint` for sparse knowledge matches (fewer than 3, respecting `--limit`), treat it as a gap signal, not a measured relevance/hit rate. If results are empty, sparse, or largely irrelevant to the task, first refine the 1-3 keyword query and resolve index/recovery hints. Keep any remaining task-specific knowledge gap in mind; **after completing the related task**, distill only validated, reusable findings and stage them through the governed `maestro knowledge stage` flow in [Knowledge instructions](instructions/knowledge.md), with evidence and the exact Run/Session identity. Review before promotion; never direct-write or auto-promote knowledge, and never manufacture candidates just to improve search coverage. Zero candidates remains valid.
+
 Use one to three core keywords; keep conceptual queries separate from code symbols. Follow relevant associations one hop: load a chunk's parent, inspect wiki backlinks/forward references, or inspect spec history. Re-search with different keywords when entering a new subsystem, after two failed fixes, or before an architecture decision.
 
 Exemptions: conversation, arithmetic, current time, and commands with no project context. If uncertain, run the gate.
@@ -33,6 +35,7 @@ Exemptions: conversation, arithmetic, current time, and commands with no project
 - **Clear intent over clever code** — be boring and obvious; no premature abstractions.
 - **No unsolicited documentation** — never generate reports, summaries, or doc files without an explicit user request; when a command requires a report, write it only to the current Run's `report.md` or declared output.
 - **Fix, don't hide** — never suppress failures (`@ts-ignore`, empty catch, `as any`, skipped tests, excessive timeouts); organize complex tasks before implementing (brief steps or Todo, not automatic Plan mode), verify with the project's own tooling, and commit incrementally.
+- **Post-change review** — after every bug fix or feature implementation, you MUST review the original design and change rationale, trace root causes, search for similar issues, and present findings and proposed actions for the user to decide.
 - **Content uniqueness** — each layer owns its abstraction level; reference, don't duplicate; avoid implementation creep.
 
 # Engineering

@@ -3,7 +3,15 @@ name: team-swarm
 description: "Swarm intelligence team skill — ACO-driven multi-agent exploration with hybrid LLM coordinator + Python optimization controller. Coordinator generates swarm-config from user task, then runs K iterations of N parallel ants guided by pheromone state. Universal task space via config (nodes + scoring rule). Triggers on \"team swarm\", \"swarm intelligence\", \"蚁群\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  contract_version: 2.1
+  consumes: []
+  produces:
+    - {path: outputs/best-solution.md, kind: swarm-best-solution, schema: swarm-best-solution/1.0, role: primary, required: true}
+    - {path: outputs/swarm-report.json, kind: swarm-report, schema: swarm-report/1.0, role: attachment, required: true}
+    - {path: 'outputs/ant-{iteration}-{ant_id}.json', kind: swarm-ant-result, schema: swarm-ant-result/1.0, role: evidence, required: false}
+  gates: {entry: [], exit: []}
 ---
 
 <teammate_contract>
@@ -86,6 +94,7 @@ role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team
 session_id: <run-id>
+run_dir: <exact run_dir from the birth packet or team-session.json.run.run_dir>
 team_name: swarm
 requirement: <task-description>
 inner_loop: false
@@ -130,27 +139,28 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 | `scripts/pheromone.py` | Pheromone matrix module (imported by aco.py) | — |
 | `scripts/scoring.py` | Pluggable scorer (script + fallback modes) | — |
 
-## Session Directory
+## Run Directory
 
 ```
-{run_dir}/work/team/
-├── team-session.json           # Session state
-├── swarm-config.json           # User-facing config (Phase 1 output)
-├── role-binding.json           # Worker role_spec path map
-├── task-space.json             # Resolved nodes list
-├── pheromone/
-│   ├── current.json            # Latest pheromone (each iter overwrites)
-│   ├── init.json               # Frozen initial state
-│   └── history/<iter>.json     # Per-iter snapshot
-├── trails/<iter>.jsonl         # Per-iter all-ant paths + scores
-├── scores/iter-<iter>-scores.json  # Scorer output (if mode == llm)
-├── {run_dir}/outputs/          # Formal deliverables
-│   ├── ant-<iter>-<id>.json    # Per-ant schema-locked output
-│   ├── swarm-report.json       # Phase 4 full report dump
-│   └── best-solution.md        # Analyst final synthesis
-├── best.json                   # Canonical best solution
-├── wisdom/                     # learnings / decisions / issues
-└── .msg/                       # Message bus
+{run_dir}/
+├── outputs/                     # Formal deliverables (registered at Run completion)
+│   ├── ant-<iter>-<id>.json
+│   ├── swarm-report.json
+│   └── best-solution.md
+└── work/team/                   # Coordination state (not formal artifacts)
+    ├── team-session.json
+    ├── swarm-config.json
+    ├── role-binding.json
+    ├── task-space.json
+    ├── pheromone/
+    │   ├── current.json
+    │   ├── init.json
+    │   └── history/<iter>.json
+    ├── trails/<iter>.jsonl
+    ├── scores/iter-<iter>-scores.json
+    ├── best.json
+    ├── wisdom/
+    └── .msg/
 ```
 
 ## Completion Action

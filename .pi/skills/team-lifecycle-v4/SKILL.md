@@ -3,7 +3,14 @@ name: team-lifecycle-v4
 description: "Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on \"team lifecycle v4\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
+contract:
+  contract_version: 2.1
+  consumes: []
+  produces:
+    - {path: outputs/spec, kind: lifecycle-spec-collection, schema: lifecycle-spec-collection/1.0, role: attachment, required: false}
+    - {path: outputs/plan, kind: lifecycle-plan-collection, schema: lifecycle-plan-collection/1.0, role: primary, required: false}
+  gates: {entry: [], exit: []}
 ---
 
 <teammate_contract>

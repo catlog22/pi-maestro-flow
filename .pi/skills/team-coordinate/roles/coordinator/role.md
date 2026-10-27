@@ -176,7 +176,7 @@ For callback/check/resume/adapt/complete: load `@commands/monitor.md` and execut
    - Role minimization: merge overlapping, absorb trivial, cap at 5
    - **Role-spec metadata**: Generate frontmatter fields (prefix, inner_loop, additional_members, message_types)
 
-4. **Output**: Write `{run_dir}/work/team/task-analysis.json`
+4. **Output**: Keep task analysis in memory until Phase 2 Step 0 resolves the exact Run; then write `{run_dir}/work/team/task-analysis.json` under that Run before reading it in subsequent steps.
 
 5. **If `needs_research: true`**: Phase 2 will spawn researcher worker first
 
@@ -205,9 +205,10 @@ Regardless of complexity score or role count, coordinator MUST:
 
 **Workflow**:
 
+0. Resolve the exact Run through **Run Lifecycle Integration** below before any Run-scoped directory, state, or team creation. Keep its locator in memory until the first `team-session.json` write.
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.claude/skills/team-coordinate`
+   - `skill_root` = directory containing the active `team-coordinate/SKILL.md` (not a hardcoded mirror path)
 
 2. **Check `needs_research` flag** from task-analysis.json:
    - If `true`: **Spawn researcher worker first** to gather codebase context
@@ -234,20 +235,20 @@ Regardless of complexity score or role count, coordinator MUST:
 
 ### Run Lifecycle Integration
 
-After session folder creation and before role-spec generation:
+Before Phase 2 Step 1 and any Run-scoped write:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; every revision comes from the immediately preceding receipt and `--actor` carries the authorized identity (`--participant` defaults to it; the CLI derives a stable request ID per distinct invocation):
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), retain them until the first `team-session.json` write and skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; every revision comes from the immediately preceding receipt and `--actor` carries the authorized identity (`--participant` defaults to it; the CLI derives a stable request ID per distinct invocation):
    ```bash
    maestro session open "<task summary>" --id <slug> --actor {actor_id} --json
    maestro session chain insert --session {session_id} --step-id {step_id} --command team-coordinate --arg "<task summary>" --actor {actor_id} --expected-orchestration-revision {open_orchestration_revision} --json
    maestro run next --session {session_id} --actor {actor_id} --expected-orchestration-revision {insert_orchestration_revision} --json
    ```
    - Slug format: `YYYYMMDD-team-coordinate-<topic>` (ASCII, ≤64 chars)
-   - Store returned `run_id` and `run_dir` in `team-session.json`:
+   - Store returned canonical `session_id`, `run_id`, and `run_dir` in `team-session.json`:
      ```json
-     "run": { "run_id": "<id>", "run_dir": "<path>" }
+     "run": { "session_id": "<canonical-session-id>", "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Resolve `run_dir` / `run_id` through the chain `birth-packet (dispatch prompt) > team-session.json.run > artifacts`. Take the first that resolves, then `maestro run check <run_id>` (idempotent); if status=sealed, follow the receipt's structured `continuation` and allocate only through a freshly fenced `run next` when Runtime reports a pending step. If none resolves, fail closed — surface the missing run_dir to the user, do NOT glob/mtime-guess a path.
+2. **Resume**: Resolve exact `session_id` + `run_id` + `run_dir` from the birth packet or `team-session.json.run`; output artifacts are not Run locators. Use `maestro run check <run_id> --session <session_id> --json` for status/output blockers, then `maestro run brief <run_id> --session <session_id> --json` for the structured `continuation`. If sealed, follow the brief and allocate only through a freshly fenced `run next` when a step is pending. If none resolves, fail closed — do NOT glob/mtime-guess a path.
 
 6. **Read `specs/role-spec-template.md`** for Behavioral Traits + Reference Patterns
 

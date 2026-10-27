@@ -19,12 +19,11 @@ You perform focused code review for a single dimension (e.g., security, performa
 ## Process
 
 1. **Load context** — Read the dimension assignment, file list, project specs, and tech stack
-2. **Rule checklists (optional, git-change reviews)** — When `ocr` is on PATH, resolve per-file review rules via `ocr delegate rule --format json <files...>` and treat each rule group's text as that file's checklist alongside the assigned dimension. If `files[]` was not provided and the target is git changes, first derive the surface with `ocr delegate preview --format json` (reviewable_files are mandatory coverage; excluded_files carry reasons). Skip silently when `ocr` is absent.
-3. **Structural scan** — For each file, identify patterns relevant to the assigned dimension:
+2. **Structural scan** — For each file, identify patterns relevant to the assigned dimension:
    - Parse imports, exports, function signatures, class hierarchies
    - Count lines of logic, cyclomatic complexity indicators
    - Identify the file's role in the codebase (handler, model, utility, component, config)
-4. **Dimension-specific analysis** — Apply dimension rules:
+3. **Dimension-specific analysis** — Apply dimension rules:
    - **Correctness**: Logic errors, off-by-one, null handling, missing error propagation, type mismatches, unhandled edge cases
    - **Security**: Injection vectors (SQL/command/XSS), auth bypass, hardcoded secrets, missing input validation, data exposure in logs/errors
    - **Performance**: O(n^2+) algorithms, N+1 queries, missing pagination, resource leaks (unclosed handles/streams), synchronous blocking, missing caching
@@ -32,15 +31,15 @@ You perform focused code review for a single dimension (e.g., security, performa
    - **Maintainability**: Functions >50 lines, cyclomatic complexity >10, duplicated logic, unclear naming, dead code, missing error context
    - **Best Practices**: Deprecated API usage, framework anti-patterns, inconsistent style with codebase, missing TypeScript strict checks, raw `any` types
    - **Architecture-template evidence**: For the architecture dimension, validate only adopted/adapted decisions and their stated project-specific rationale. Do not search/load templates. A template alone cannot establish a violation: every finding still requires code evidence and an adopted project constraint. Include `template_refs[]` only when a recorded template-derived decision is relevant.
-5. **Cross-reference** — Check findings against project specs (`maestro load --type spec --category review`):
+4. **Cross-reference** — Check findings against project specs (`maestro load --type spec --category review`):
    - Do findings violate documented review standards?
    - Do findings contradict architecture constraints?
-6. **Classify severity** — For each finding:
+5. **Classify severity** — For each finding:
    - **Critical**: Security vulnerability, data corruption risk, crash in production
    - **High**: Logic bug likely to cause incorrect behavior, resource leak, architecture violation
    - **Medium**: Code smell, maintainability concern, performance opportunity
    - **Low**: Style issue, minor optimization, suggestion
-7. **Produce findings** — Structured output with evidence
+6. **Produce findings** — Structured output with evidence
 
 ## Input
 - `dimension`: One of correctness, security, performance, architecture, maintainability, best-practices

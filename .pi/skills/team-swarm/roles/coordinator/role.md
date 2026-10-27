@@ -111,7 +111,7 @@ When coordinator needs to execute a phase command:
    - `task_space.nodes` OR `task_space.auto_discover_from`
    - `scoring.mode` ∈ {script, llm, fallback} based on user answer
    - `ant_prompt.objective` — the actual goal injected into ant role-spec at spawn
-4. Write config to `{run_dir}/work/team/swarm-config.json`
+4. Keep config in memory until the Run birth packet provides the exact `run_dir` (self-start Run allocation is the first action of Phase 2). Never write into a guessed Run directory.
 
 **CRITICAL**: Phase 1 does NOT call `aco.py`. It only produces the config.
 
@@ -121,7 +121,7 @@ When coordinator needs to execute a phase command:
 
 Delegate to `@commands/init-swarm.md`:
 
-1. Generate session ID: `TS-<slug>-<date>` (slug from task)
+1. Resolve or self-start the exact Session/Run as described in `init-swarm.md` before any Run-scoped file write.
 2. Create session folder structure:
    ```
    {run_dir}/work/team/
@@ -131,27 +131,27 @@ Delegate to `@commands/init-swarm.md`:
    └── role-binding.json    (paths to role.md files)
    ```
 3. TeamCreate with team_name = `swarm`
-4. Bash: `python <skill_root>/scripts/aco.py --session {run_dir}/work/team init`
+4. Bash: `python <skill_root>/scripts/aco.py --session {run_dir}/work/team --run-dir <run_dir> init`
 5. Parse stdout JSON: capture `n_nodes`, `n_edges`, `pheromone_path`
 6. Initialize team-session.json with `iteration: 0`, `status: "active"`
 7. Log state_update via team_msg with config summary
 
 ### Run Lifecycle Integration
 
-After session folder creation and before role-spec generation:
+Before creating the session folder or writing `swarm-config.json`:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; every revision comes from the immediately preceding receipt and `--actor` carries the authorized identity (`--participant` defaults to it; the CLI derives a stable request ID per distinct invocation):
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), retain them in memory and persist them at init-swarm Step 7 after creating the parent directory; skip self-start — a second allocation mints a duplicate Run. Otherwise execute this receipt-chained self-start recipe; every revision comes from the immediately preceding receipt and `--actor` carries the authorized identity (`--participant` defaults to it; the CLI derives a stable request ID per distinct invocation):
    ```bash
    maestro session open "<task summary>" --id <slug> --actor {actor_id} --json
    maestro session chain insert --session {session_id} --step-id {step_id} --command team-swarm --arg "<task summary>" --actor {actor_id} --expected-orchestration-revision {open_orchestration_revision} --json
    maestro run next --session {session_id} --actor {actor_id} --expected-orchestration-revision {insert_orchestration_revision} --json
    ```
    - Slug format: `YYYYMMDD-team-swarm-<topic>` (ASCII, ≤64 chars)
-   - Store returned `run_id` and `run_dir` in `team-session.json`:
+   - Store returned canonical `session_id`, `run_id`, and `run_dir` in `team-session.json` (the top-level team `session_id` remains the Run ID for team_msg):
      ```json
-     "run": { "run_id": "<id>", "run_dir": "<path>" }
+     "run": { "session_id": "<canonical-session-id>", "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, follow the receipt's structured `continuation`; allocate another Run only through a freshly fenced `run next` after Runtime reports a pending step. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
+2. **Resume**: Resolve exact `session_id` + `run_id` + `run_dir` from the birth packet or `team-session.json.run`; never infer a Run ID from output files. Read `maestro run check <run_id> --session <session_id> --json` for status/output blockers, then `maestro run brief <run_id> --session <session_id> --json` for the structured `continuation`. If sealed, follow the brief's continuation; allocate another Run only through a freshly fenced `run next` when it reports a pending step. If the locator is absent or inconsistent, fail closed rather than minting a duplicate Run.
 
 ---
 
@@ -173,6 +173,7 @@ After session folder creation and before role-spec generation:
    role_spec: <skill_root>/roles/ant/role.md
    session: {run_dir}/work/team
    session_id: <run-id>
+   run_dir: <exact run_dir from the birth packet or team-session.json.run.run_dir>
    team_name: swarm
    requirement: <ant_prompt.objective> | Assignment: <full assignment JSON>
    inner_loop: false
@@ -198,7 +199,7 @@ After session folder creation and before role-spec generation:
 
 Delegate to `@commands/converge.md`:
 
-1. Bash: `python aco.py --session {run_dir}/work/team report` -> capture best + top_k + curve
+1. Bash: `python aco.py --session {run_dir}/work/team --run-dir <run_dir> report` -> capture best + top_k + curve
 2. Spawn analyst worker:
    ```
    role: analyst

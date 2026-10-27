@@ -3,7 +3,7 @@ name: skill-generator
 description: "Meta-skill for creating new Claude Code skills with configurable execution modes. Supports sequential (fixed order) and autonomous (stateless) phase patterns. Use for skill scaffolding, skill creation, or building new workflows. Triggers on \"create skill\", \"new skill\", \"skill generator\"."
 allowed-tools: teammate Read Bash Glob Grep Write observe maestro
 disable-model-invocation: true
-session-mode: none
+session-mode: run
 ---
 
 <teammate_contract>
