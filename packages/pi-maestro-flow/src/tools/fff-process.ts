@@ -1,5 +1,6 @@
 import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
 import type { FileFinderApi, InitOptions, Result } from "@ff-labs/fff-node";
+import { resolveJavaScriptRuntime } from "../process/node-runtime.ts";
 
 type AsyncSearch<K extends "grep" | "glob" | "fileSearch"> = (
   ...args: Parameters<FileFinderApi[K]>
@@ -61,7 +62,7 @@ export function createFffProcessFinder(
     // fork forwards windowsHide to spawn, although some Node type versions
     // omit it from ForkOptions.
     const workerOptions: ForkOptions & { windowsHide: boolean } = {
-      execPath: process.execPath,
+      execPath: resolveJavaScriptRuntime(),
       execArgv: [],
       env,
       stdio: ["ignore", "ignore", "pipe", "ipc"],
