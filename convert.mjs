@@ -17,7 +17,7 @@ const DST = join(dirname(fileURLToPath(import.meta.url)), '.pi-sync');
 // --- Frontmatter parser ---
 function parseFrontmatter(content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) return { meta: {}, body: content };
+  if (!match) return { meta: {}, body: content, rawYaml: '' };
 
   const rawYaml = match[1];
   const body = match[2];
@@ -59,7 +59,7 @@ function parseFrontmatter(content) {
     meta[currentKey] = listItems;
   }
 
-  return { meta, body };
+  return { meta, body, rawYaml };
 }
 
 // --- Convert allowed-tools ---
@@ -81,8 +81,20 @@ function convertAllowedTools(tools) {
   return '';
 }
 
+// Preserve the source's nested lifecycle contract without flattening it through
+// the minimal scalar/list parser above. Pi accepts additional YAML frontmatter
+// fields, and Maestro resolves the same contract from every skill mirror.
+function lifecycleContractBlock(rawYaml) {
+  const lines = rawYaml.split(/\r?\n/);
+  const start = lines.findIndex(line => /^contract:\s*$/.test(line));
+  if (start < 0) return '';
+  let end = start + 1;
+  while (end < lines.length && (lines[end].trim() === '' || /^\s+/.test(lines[end]))) end++;
+  return lines.slice(start, end).join('\n').trimEnd();
+}
+
 // --- Build SKILL.md frontmatter ---
-function buildSkillFrontmatter(meta) {
+function buildSkillFrontmatter(meta, rawYaml = '') {
   const lines = ['---'];
 
   if (meta.name) lines.push(`name: ${meta.name}`);
@@ -100,6 +112,9 @@ function buildSkillFrontmatter(meta) {
   // Preserve other useful fields
   if (meta['auto-continue']) lines.push(`auto-continue: ${meta['auto-continue']}`);
   if (meta['disable-model-invocation']) lines.push(`disable-model-invocation: ${meta['disable-model-invocation']}`);
+  if (meta['session-mode']) lines.push(`session-mode: ${meta['session-mode']}`);
+  const contract = lifecycleContractBlock(rawYaml);
+  if (contract) lines.push(contract);
 
   lines.push('---');
   return lines.join('\n');
@@ -148,13 +163,13 @@ function convertCommands() {
   for (const file of files) {
     try {
       const content = readFileSync(join(srcDir, file), 'utf-8');
-      const { meta, body } = parseFrontmatter(content);
+      const { meta, body, rawYaml } = parseFrontmatter(content);
       const name = meta.name || basename(file, '.md');
 
       const skillDir = join(dstDir, name);
       mkdirSync(skillDir, { recursive: true });
 
-      const frontmatter = buildSkillFrontmatter(meta);
+      const frontmatter = buildSkillFrontmatter(meta, rawYaml);
       const output = frontmatter + '\n\n' + body.trim() + '\n';
 
       writeFileSync(join(skillDir, 'SKILL.md'), output, 'utf-8');
@@ -208,12 +223,12 @@ function convertSkills() {
       }
 
       const content = readFileSync(skillFile, 'utf-8');
-      const { meta, body } = parseFrontmatter(content);
+      const { meta, body, rawYaml } = parseFrontmatter(content);
 
       const targetDir = join(dstDir, dir);
       mkdirSync(targetDir, { recursive: true });
 
-      const frontmatter = buildSkillFrontmatter(meta);
+      const frontmatter = buildSkillFrontmatter(meta, rawYaml);
       const output = frontmatter + '\n\n' + body.trim() + '\n';
 
       // Recursively copy the ENTIRE skill directory so no subsidiary

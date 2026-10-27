@@ -1,9 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { convertPiDirectory, transformPiContent } from "../../../convert-pi.mjs";
+
+const piSkills = join(import.meta.dirname, "..", "..", "..", ".pi", "skills");
+
+test("converted team skill mirrors retain v3 Run contracts", () => {
+  for (const name of ["team-arch-opt", "team-issue", "team-lifecycle-v4", "team-perf-opt",
+    "team-review", "team-swarm", "team-testing"]) {
+    const skill = readFileSync(join(piSkills, name, "SKILL.md"), "utf8");
+    assert.match(skill, /^session-mode: run$/m, `${name}: lost source session mode`);
+    assert.match(skill, /^contract:\r?\n  contract_version: 2\.1$/m, `${name}: lost nested contract`);
+  }
+  const swarm = readFileSync(join(piSkills, "team-swarm", "SKILL.md"), "utf8");
+  assert.match(swarm, /path: outputs\/best-solution\.md, kind: swarm-best-solution, schema: swarm-best-solution\/1\.0, role: primary, required: true/);
+  assert.match(swarm, /outputs\/ant-\{iteration\}-\{ant_id\}\.json/);
+  const coordinator = readFileSync(join(piSkills, "team-swarm", "roles", "coordinator", "role.md"), "utf8");
+  assert.match(coordinator, /maestro run brief <run_id> --session <session_id> --json/);
+});
 
 test("convert-pi: missing destination roots produce an empty conversion result", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-convert-empty-"));
