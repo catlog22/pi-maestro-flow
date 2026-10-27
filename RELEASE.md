@@ -1,3 +1,58 @@
+# v0.35.1 — Recovery and Runtime Reliability
+
+## Overview
+
+Flow **0.35.1** and Teammate **2.10.2** include the changes after the published
+v0.35.0 candidate commit `b2451eac`: 11 commits across 83 files before release
+metadata, approximately 3.2k additions and 0.6k deletions. Teammate is published
+first; Flow pins the new Teammate version. The other 11 workspace packages have
+matching local and registry tarball SHA-1s and remain unchanged.
+
+## Changes
+
+- Bound session-history discovery and pagination across Flow and Teammate,
+  including omission accounting and checkpoint recovery.
+- Preserve recovery context and continuation behavior across compaction; improve
+  teammate subprocess interaction and lifecycle handling.
+- Resolve a Node executable for child processes and preserve lifecycle contracts
+  when converting skills.
+- Update workflow and swarm guidance, scoring behavior, knowledge closeout and
+  self-evolve staging and routing.
+
+## Versions and upgrade
+
+| Package | Version |
+|---|---|
+| pi-maestro-flow | 0.35.1 |
+| pi-maestro-teammate | 2.10.2 |
+| pi-cockpit | 0.24.5 (unchanged) |
+| pi-maestro-settings-core | 0.2.3 (unchanged) |
+| pi-maestro-backend-core / pi-maestro-backends | 0.1.5 / 0.1.7 (unchanged) |
+| pi-maestro-fabric / pi-maestro-fabric-core | 0.1.0 (unchanged) |
+| pi-fluent-tui | 0.1.2 (unchanged) |
+| @dyw1234/active-win | 9.0.1 (unchanged) |
+| @dyw1234/nut-js / nut-shared / nut-provider-interfaces | 4.2.7 (unchanged) |
+
+```bash
+pi install npm:pi-maestro-flow@0.35.1
+```
+
+Close Pi before upgrading and restart afterward; update any preserved Teammate
+override to 2.10.2. Flow's `maestro-flow >=0.5.91` range includes npm 0.5.93.
+
+## Verification and known limitation
+
+Focused tests passed: Flow 354, Teammate 110, swarm 79; both changed package
+typechecks and Teammate declaration consistency passed. These results do not
+claim repository-wide coverage.
+
+The prior v0.35.0 installed Pi RPC process did not exit within 45 seconds after
+stdin EOF; its cause remains unknown and clean shutdown has not been verified.
+The user explicitly accepted this unresolved risk for this release. No shutdown
+fix or successful end-to-end shutdown test is claimed.
+
+---
+
 # v0.35.0 — Refine Transport & Unified Runtime Lifecycles
 
 ## Overview
