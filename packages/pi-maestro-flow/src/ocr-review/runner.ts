@@ -4,6 +4,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, normalize } from "node:path";
 import { reclaimOwnedProcessTree } from "../process/owned-process-tree.ts";
+import { nodeExecutable } from "../tools/node-executable.ts";
 
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const DIAGNOSTIC_BYTES = 4096;
@@ -70,7 +71,7 @@ export function resolveOcrCommand(pathEnv = process.env.PATH ?? ""): OcrCommand 
       const legacy = join(dirname(launcher), filename);
       if (isFile(legacy)) return { command: legacy, args: [] };
       // Older/custom npm installs still use their own launcher and diagnostics.
-      return { command: process.execPath, args: [launcher] };
+      return { command: nodeExecutable(), args: [launcher] };
     }
   }
   return undefined;

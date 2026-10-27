@@ -12,6 +12,7 @@ import {
   createSmartSearchTool,
   registerSmartSearch,
   type SmartSearchRunOptions,
+  type SmartSearchRunResult,
   type SmartSearchRunner,
 } from "../src/tools/smart-search.ts";
 
@@ -230,6 +231,15 @@ test("SmartSearch node runner uses an injected wrapper, caps output, and aborts"
   const runner = createSmartSearchRunner(() => wrapperPath);
   const completed = await runner.run(["search", "query"], { cwd: directory, maxOutputBytes: 4_096 });
   assert.deepEqual(JSON.parse(completed.stdout), { argv: ["search", "query"] });
+  const originalExecPath = process.execPath;
+  let compiledHostRun: Promise<SmartSearchRunResult>;
+  try {
+    Object.defineProperty(process, "execPath", { value: "/fake/pi-bin", configurable: true });
+    compiledHostRun = runner.run(["search", "compiled-host"], { cwd: directory, maxOutputBytes: 4_096 });
+  } finally {
+    Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+  }
+  assert.deepEqual(JSON.parse((await compiledHostRun).stdout), { argv: ["search", "compiled-host"] });
   await assert.rejects(() => runner.run(["large"], { cwd: directory, maxOutputBytes: 1_024 }), /exceeded 1024 bytes/);
 
   await assert.rejects(

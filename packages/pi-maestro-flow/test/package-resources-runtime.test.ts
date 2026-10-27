@@ -171,6 +171,19 @@ test("canonical SYSTEM keeps specialized instructions discoverable without eager
   assert.match(knowledge, /Never bypass the gate by editing evidence refs/);
 });
 
+test("canonical SYSTEM requires post-change review and governed low-hit knowledge follow-up", () => {
+  const sourcePath = fileURLToPath(new URL("../../../.pi/SYSTEM.md", import.meta.url));
+  const instructions = loadBundledAgentsInstructions(sourcePath);
+  assert.ok(instructions);
+  assert.match(instructions, /after every bug fix or feature implementation.*review the original design and change rationale, trace root causes, search for similar issues/);
+  assert.match(instructions, /present findings and proposed actions for the user to decide/);
+  assert.match(instructions, /knowledgeCaptureHint.*fewer than 3, respecting `--limit`.*gap signal, not a measured relevance\/hit rate/);
+  assert.match(instructions, /empty, sparse, or largely irrelevant.*refine the 1-3 keyword query and resolve index\/recovery hints/);
+  assert.match(instructions, /after completing the related task.*validated, reusable findings.*maestro knowledge stage.*\[Knowledge instructions\]\(instructions\/knowledge\.md\).*evidence and the exact Run\/Session identity/);
+  assert.match(instructions, /Review before promotion; never direct-write or auto-promote knowledge/);
+  assert.match(instructions, /never manufacture candidates just to improve search coverage\. Zero candidates remains valid/);
+});
+
 test("canonical SYSTEM keeps delivery gates justified and correction budgets cumulative", () => {
   const sourcePath = fileURLToPath(new URL("../../../.pi/SYSTEM.md", import.meta.url));
   const instructions = loadBundledAgentsInstructions(sourcePath);

@@ -111,6 +111,19 @@ test("options are unchanged and child does not inherit loader/inspector flags", 
   } finally { await finder.destroy(); }
 });
 
+test("compiled host launches the worker with Node", async () => {
+  const original = process.execPath;
+  let finder: FffFinder;
+  try {
+    Object.defineProperty(process, "execPath", { value: "/fake/pi-bin", configurable: true });
+    finder = create({ basePath: "fixture" }, fixture);
+  } finally {
+    Object.defineProperty(process, "execPath", { value: original, configurable: true });
+  }
+  try { assert.ok((await metadata(finder)).pid); }
+  finally { await finder.destroy(); }
+});
+
 test("worker crash rejects every pending request and a new finder still works", async () => {
   const finder = create({ basePath: "fixture" }, fixture);
   const { pid } = await metadata(finder);
@@ -476,21 +489,21 @@ test("plain real worker exits when its parent disconnects", async () => {
 test("packaged layout works in a fresh Node parent with native/Pi imports forbidden", { timeout: 60_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "fff-process-packed-"));
   try {
-    // No package lifecycle scripts or full packed-consumer suite: only these two
-    // published files and their actual runtime dependency closure are exercised.
+    // No package lifecycle scripts or full packed-consumer suite: only the worker
+    // and its actual runtime dependency closure are exercised.
     const npm = process.platform === "win32" ? "npm.cmd" : "npm";
     const packed = await exec(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", root], {
       cwd: packageRoot, timeout: 30_000, maxBuffer: 8 * 1024 * 1024,
       shell: process.platform === "win32",
     });
     const [manifest] = JSON.parse(packed.stdout);
-    for (const path of ["src/tools/fff-process.ts", "bin/fff-worker.mjs"]) {
+    for (const path of ["src/tools/fff-process.ts", "src/tools/node-executable.ts", "bin/fff-worker.mjs"]) {
       assert.ok(manifest.files.some((file: { path: string }) => file.path === path), `${path} must be published`);
     }
     // Relative archive/destination also work with Git-for-Windows tar, which
     // otherwise interprets a drive-letter colon as a remote archive host.
     await exec("tar", ["-xf", manifest.filename, "-C", ".",
-      "package/package.json", "package/src/tools/fff-process.ts", "package/bin/fff-worker.mjs"], { cwd: root, timeout: 10_000 });
+      "package/package.json", "package/src/tools/fff-process.ts", "package/src/tools/node-executable.ts", "package/bin/fff-worker.mjs"], { cwd: root, timeout: 10_000 });
     const staged = join(root, "package");
     const seen = new Set<string>();
     async function copyRuntime(name: string, from: string): Promise<void> {

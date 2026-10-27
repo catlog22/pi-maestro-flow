@@ -6,6 +6,7 @@ import type {
   CodexHooksFile,
 } from "./schema.ts";
 import { hookHandlerId, hookHandlerIdentity } from "./review.ts";
+import { nodeExecutable } from "../tools/node-executable.ts";
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const TERMINATION_GRACE_MS = 1_000;
@@ -125,7 +126,7 @@ export function runCommandHook(
       ? handler.commandWindows
       : handler.command;
     const child = process.platform === "win32"
-      ? spawn(process.execPath, ["-e", WINDOWS_COMMAND_WRAPPER, command], {
+      ? spawn(nodeExecutable(), ["-e", WINDOWS_COMMAND_WRAPPER, command], {
           cwd,
           windowsHide: true,
           stdio: ["pipe", "pipe", "pipe", "pipe"],

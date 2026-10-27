@@ -23,6 +23,7 @@ import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { nativeSearch } from "./web-access/search-router.ts";
 import { nativeFetch } from "./web-access/fetch-router.ts";
 import { reclaimOwnedProcessTree } from "../process/owned-process-tree.ts";
+import { nodeExecutable } from "./node-executable.ts";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
@@ -137,7 +138,7 @@ export function createSmartSearchRunner(
       const timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_HOST_TIMEOUT_MS, "timeoutMs");
       const wrapperPath = resolveWrapper();
       return new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [wrapperPath, ...args], {
+        const child = spawn(nodeExecutable(), [wrapperPath, ...args], {
           cwd: options.cwd,
           // POSIX group isolation only: the child remains referenced and every
           // terminal path reclaims the group before this runner settles.

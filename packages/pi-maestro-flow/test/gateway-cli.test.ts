@@ -63,6 +63,29 @@ test("binary locator falls back to the packaged CLI without a PATH install", (t)
   assert.deepEqual(located.argsPrefix, [bin]);
 });
 
+test("packaged gateway uses Node under a compiled host", () => {
+  const original = process.execPath;
+  const previousOfficial = process.env.PI_MAESTRO_GATEWAY_BIN;
+  try {
+    delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    Object.defineProperty(process, "execPath", { value: "/fake/pi-bin", configurable: true });
+    resetGatewayBinaryCache();
+    const located = locateGatewayBinary();
+    assert.ok(located);
+    assert.equal(located.command, "node");
+    const result = spawnSync(located.command, [...located.argsPrefix!, "version", "--json"], {
+      encoding: "utf8", timeout: 10_000, windowsHide: true,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).name, "pi-maestro-gateway");
+  } finally {
+    Object.defineProperty(process, "execPath", { value: original, configurable: true });
+    if (previousOfficial === undefined) delete process.env.PI_MAESTRO_GATEWAY_BIN;
+    else process.env.PI_MAESTRO_GATEWAY_BIN = previousOfficial;
+    resetGatewayBinaryCache();
+  }
+});
+
 test("connect --stdio reports one deterministic offline error", async () => {
   const home = await mkdtemp(join(tmpdir(), "gateway-cli-offline-"));
   try {

@@ -58,6 +58,24 @@ test("OCR preserves custom PATH priority and supports legacy and launcher-only n
   }
 });
 
+test("OCR launcher uses Node under a compiled host", async () => {
+  const { root, launcher } = await installation();
+  const original = process.execPath;
+  try {
+    await writeFile(launcher, "console.log(JSON.stringify(process.argv.slice(2)));\n");
+    Object.defineProperty(process, "execPath", { value: "/fake/pi-bin", configurable: true });
+    const command = resolveOcrCommand(root);
+    assert.deepEqual(command, { command: "node", args: [launcher] });
+    const pending = createOcrRunner(() => command)(["hello"], { cwd: root });
+    Object.defineProperty(process, "execPath", { value: original, configurable: true });
+    const result = await pending;
+    assert.deepEqual(JSON.parse(result.stdout), ["hello"]);
+  } finally {
+    Object.defineProperty(process, "execPath", { value: original, configurable: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("OCR pre-abort and invalid timeout do not resolve or spawn a command", async () => {
   const runner = createOcrRunner(() => { throw new Error("must not resolve"); });
   await assert.rejects(runner([], { cwd: process.cwd(), signal: AbortSignal.abort() }), /aborted/);

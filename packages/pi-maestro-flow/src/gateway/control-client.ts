@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { spawnSync, type SpawnOptions } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import crossSpawn from "cross-spawn";
+import { nodeExecutable } from "../tools/node-executable.ts";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATEWAY_PROTOCOL_VERSION, type GatewayOwnerRecord, type GatewayWorkspace } from "./contracts.ts";
@@ -98,7 +99,7 @@ function packagedGatewayBinary(): GatewayBinaryInfo | undefined {
   try {
     const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8")) as { name?: unknown; version?: unknown };
     if (manifest.name !== "pi-maestro-flow" || typeof manifest.version !== "string") return undefined;
-    return { path, version: manifest.version, source: "package", command: process.execPath, argsPrefix: [path] };
+    return { path, version: manifest.version, source: "package", command: nodeExecutable(), argsPrefix: [path] };
   } catch {
     return undefined;
   }

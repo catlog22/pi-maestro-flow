@@ -490,6 +490,21 @@ process.stdin.on("end", () => {
   }
 });
 
+test("Windows command hook uses Node under a compiled host", { skip: process.platform !== "win32" }, async () => {
+  const config = validateCodexHooks({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo hook-ok", timeout: 5 }] }] } });
+  const original = process.execPath;
+  let pending: ReturnType<typeof runMatchingCommandHooks>;
+  try {
+    Object.defineProperty(process, "execPath", { value: "C:\\fake\\pi-bin.exe", configurable: true });
+    pending = runMatchingCommandHooks(config, "Stop", [], {}, process.cwd());
+  } finally {
+    Object.defineProperty(process, "execPath", { value: original, configurable: true });
+  }
+  const [result] = await pending;
+  assert.equal(result.exitCode, 0, result.error);
+  assert.match(result.stdout, /hook-ok/);
+});
+
 test("command hook timeout is enforced", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-timeout-"));
   const scriptPath = join(root, "slow.cjs");
