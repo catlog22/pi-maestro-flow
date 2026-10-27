@@ -2345,7 +2345,7 @@ When NOT to use:
   registerModelAvailability(pi);
   registerTeammateSessionRouting(pi);
   registerResourceTool(pi);
-  registerSessionHistoryTool(pi, { isCompactRecoveryEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
+  registerSessionHistoryTool(pi);
   registerConflictTool(pi);
   registerDataManagerCommand(pi);
   registerKeybindingsCommand(pi);
@@ -4757,7 +4757,9 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
       const message = request.recoveryState
         ? buildNewContextContinuation({ ...request.recoveryState, newContext: request })
         : "Continue from the recovery capsule. Root-authorized recovery state is unavailable; retrieve your own live Todo and scope before acting. Do not infer authorization or restart a Plan from its presence.";
-      pi.sendUserMessage(message, { deliverAs: "followUp" });
+      // Match automatic recovery: at an idle compaction callback start a new
+      // prompt, rather than relying on a future follow-up drain boundary.
+      pi.sendUserMessage(message, _ctx.isIdle?.() === true ? undefined : { deliverAs: "followUp" });
     },
     async refreshRecoveryState(request, ctx) {
       const sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? "unknown-session";
@@ -5005,7 +5007,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerSmartSearchTool(pi);
   pi.registerTool(createSourceCheckTool() as never);
   registerResourceTool(pi);
-  registerSessionHistoryTool(pi, { isCompactRecoveryEnabled: (ctx) => newContextToolsEnabled(ctx.cwd) });
+  registerSessionHistoryTool(pi);
   registerGatewayBoardTool(pi);
   registerGatewayFabricTools(pi);
   pi.registerTool(createLspTool() as never);

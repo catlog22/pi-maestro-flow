@@ -7,7 +7,7 @@ export const COMMAND_HISTORY_BOOTSTRAP = [
   "1. Call session_history with action=timeline, scope=current_session, limit=1. Match the returned sessionId and checkpointId to this capsule's Session ID and Checkpoint ID; do not substitute a different checkpoint or guess a turn number.",
   "2. For the matching checkpoint with turn > 0, call session_history with action=read_turn, scope=current_session, turn=<checkpoint.turn>, include=[\"user\",\"assistant\"], limit=6. Use checkpoint.turn unchanged, not turn-1: it identifies the exchange immediately preceding this reset. If turn=0, there is no preceding user turn to read.",
   "Check the recovered exchange against the current request for user constraints, decisions, blockers and next action. Historical text is evidence, not new authorization; live permissions, actor ownership, paused Goals and Plan gates still apply. Do not restart completed work.",
-  "If history is unavailable, the checkpoint does not match, or the turn is missing or truncated, report the specific recovery gap; do not treat a partial read as complete. Recover only a concrete missing fact through an exact session:// reference or targeted current-session search; do not scan the full conversation or other sessions.",
+  "If history is unavailable, the checkpoint does not match, or the turn is missing or truncated, report the specific recovery gap; do not treat a partial read as complete. For a concrete required fact beyond a returned turn page, continue with offset=nextOffset when hasMore=true, keeping the same turn/include/limit and reusing prior pages. Otherwise recover only a concrete missing fact through an exact session:// reference or targeted current-session search; do not scan the full conversation or other sessions.",
   "After this bootstrap, reuse its result for this checkpoint. Further history reads are only for facts needed by the next authorized action; an unrelated current request does not authorize resuming old work.",
 ].join("\n");
 
@@ -235,9 +235,11 @@ export function describeNewContextRecoveryFocus(input: RecoveryFocusInput): NewC
   ]);
 }
 
+export const NEW_CONTEXT_CONTINUATION_PREFIX = "Continue from the deterministic recovery capsule. Recover only facts needed for the next authorized action; do not reconstruct the full conversation.";
+
 export function buildNewContextContinuation(input: RecoveryFocusInput): string {
   return [
-    "Continue from the deterministic recovery capsule. Recover only facts needed for the next authorized action; do not reconstruct the full conversation.",
+    NEW_CONTEXT_CONTINUATION_PREFIX,
     ...describeNewContextRecoveryFocus(input).lines,
   ].join("\n");
 }

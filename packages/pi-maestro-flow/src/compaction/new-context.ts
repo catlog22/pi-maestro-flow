@@ -89,7 +89,7 @@ export interface NewContextController {
 
 export interface NewContextControllerOptions {
   continueAfterReset?: (
-    ctx: Pick<ExtensionContext, "sessionManager" | "ui" | "hasPendingMessages">,
+    ctx: Pick<ExtensionContext, "sessionManager" | "ui" | "hasPendingMessages" | "isIdle">,
     request: ScheduledNewContextRequest,
   ) => void;
   /** Refresh root-authorized state immediately before a child reset owns a lease. */
@@ -203,7 +203,7 @@ export function createNewContextController(
     inFlight = undefined;
   };
   const continueAfterReset = (
-    ctx: Pick<ExtensionContext, "sessionManager" | "ui" | "hasPendingMessages">,
+    ctx: Pick<ExtensionContext, "sessionManager" | "ui" | "hasPendingMessages" | "isIdle">,
     request: ScheduledNewContextRequest,
   ): boolean => {
     if (ctx.hasPendingMessages?.()) return false;
@@ -335,12 +335,14 @@ export function createNewContextController(
     // reflects all root mutations that occurred while the child was running.
     if (options.refreshRecoveryState) {
       settlingRequestId = request.requestId;
+      publishRecoveryState(request, "pending", "refreshing-root-recovery");
       try {
         const recoveryState = await options.refreshRecoveryState(request, ctx);
         if (!recoveryState) throw new Error("Root-authorized recovery state was unavailable");
         if (!isCurrentRequest(request, ctx)) return false;
         request.recoveryState = recoveryState;
         request.todoRevision = recoveryState.todo.revision;
+        publishRecoveryState(request, "pending", "root-recovery-refreshed");
       } catch (error) {
         if (isCurrentRequest(request, ctx)) {
           pending = undefined;
@@ -413,7 +415,7 @@ export function createNewContextController(
     // A prior pending announcement may have been ignored while another
     // producer owned the parent settlement. Re-announce only after this
     // request actually owns the lease.
-    publishRecoveryState(request, "pending");
+    publishRecoveryState(request, "pending", "compact-requested");
     // This is the sole pending→inFlight transition. Keep pending until
     // compact() returns successfully; a throwing host call must not lose the
     // request before its fallback continuation is accepted.
@@ -602,10 +604,14 @@ function activeTaskIdentityBlock(task: TodoTask): string {
   return lines.join("\n");
 }
 
-function taskBlock(task: TodoTask, contextBytes: number, summaryBytes: number): string {
+function taskBlock(task: TodoTask, contextBytes: number, summaryBytes: number, descriptionBytes = 0): string {
   const lines = [
     `- [#${boundedUtf8(task.id, 128)}] ${boundedUtf8(task.subject, 512)} (${task.status}; assignee=${boundedUtf8(task.assignee.label || task.assignee.id, 128)})`,
   ];
+  if (task.description && descriptionBytes > 0) {
+    const description = boundedUtf8(task.description, descriptionBytes);
+    lines.push(`  description: ${JSON.stringify(escapeCapsuleMarkup(description))}${description === task.description ? "" : " [truncated; recover Todo description]"}`);
+  }
   if (task.context) lines.push(`  context: ${boundedUtf8(task.context, contextBytes)}`);
   if (task.summary) lines.push(`  summary: ${boundedUtf8(task.summary, summaryBytes)}`);
   if (task.blockedBy.length) lines.push(`  blockedBy: ${task.blockedBy.map((id) => `#${id}`).join(", ")}`);
@@ -792,10 +798,13 @@ function selectedHandoffFileLine(file: SelectedNewContextHandoffFile): string {
   return `- ${file.path} [${file.value}; source=${source}; annotationRevision=${file.annotationRevision}]: ${file.reason}${file.when ? `; when=${file.when}` : ""}`;
 }
 
+function escapeCapsuleMarkup(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** External verifier prose stays a quoted data line, never capsule structure/instructions. */
 function quotedVerificationEvidence(value: string, maxBytes = 1_024): string {
-  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, " ")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const cleaned = escapeCapsuleMarkup(value.replace(/[\u0000-\u001f\u007f]/g, " "));
   let text = boundedUtf8(cleaned, maxBytes - 2);
   let quoted = JSON.stringify(text);
   while (Buffer.byteLength(quoted, "utf8") > maxBytes) {
@@ -883,6 +892,24 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     lines.push("- Plan body is not expanded. Read the source only as required by the recovery focus and task constraints; approval and permission checks still apply.");
   }
 
+  const conversation = details.conversationRecovery;
+  if (conversation) {
+    lines.push("", "## Conversation Recovery",
+      "- These are source-evidence pointers, not a fact ledger or new authorization. Recover only constraints, decisions, cumulative failure budgets, or still-valid verification evidence missing from the current task's context/handoff.",
+      "- Without an owned Todo context/handoff, recover the assigned request before resuming. Teammates must verify the dispatched target, scope, acceptance, output contract and caller; a session's first user message may precede that dispatch in forked history.",
+      "- Use resource for an exact session:// entry; follow its nextPage when the needed evidence is truncated. Do not replay the entire conversation.");
+    if (conversation.initialUserEntryId && !conversation.recentUserEntryIds.includes(conversation.initialUserEntryId)) {
+      lines.push(`- Initial session user message: session://${details.sessionId}/entry/${conversation.initialUserEntryId}`);
+    }
+    for (const [index, entryId] of conversation.recentUserEntryIds.entries()) {
+      lines.push(`- ${index === 0 ? "Latest" : "Earlier"} user-role message (historical evidence): session://${details.sessionId}/entry/${entryId}`);
+    }
+    if (conversation.previousCheckpointEntryId) {
+      lines.push(`- Previous checkpoint summary, only for a missing decision/budget/evidence: session://${details.sessionId}/entry/${conversation.previousCheckpointEntryId}`);
+    }
+    lines.push(`- Earlier user messages not indexed: ${conversation.omittedUserMessages}. Use targeted current-session search for a specific missing fact; absence here is not absence from history.`);
+  }
+
   const tasks = details.todo.tasks.filter((task) => task.status !== "deleted");
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const actorId = details.newContext?.actorId ?? "root";
@@ -903,11 +930,11 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     transitionResources: 0,
     references: 0,
   };
-  const appendSection = (title: string, entries: TodoTask[], contextBytes: number, summaryBytes: number) => {
+  const appendSection = (title: string, entries: TodoTask[], contextBytes: number, summaryBytes: number, descriptionBytes = 0) => {
     if (!entries.length) return;
     lines.push("", `## ${title}`);
     for (const [index, task] of entries.entries()) {
-      let block = taskBlock(task, contextBytes, summaryBytes);
+      let block = taskBlock(task, contextBytes, summaryBytes, descriptionBytes);
       if (title === "Active Todo Tasks") {
         const remainingIdentities = entries.slice(index + 1).map(activeTaskIdentityBlock);
         const keepsAllActiveIdentities = Buffer.byteLength(
@@ -926,7 +953,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
       lines.push(block);
     }
   };
-  appendSection("Active Todo Tasks", active, 2_048, 1_024);
+  appendSection("Active Todo Tasks", active, 2_048, 1_024, 2_048);
 
   if (details.newContext?.carryForward) {
     const title = details.newContext.source === "plan-confirm"
@@ -977,7 +1004,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     lines.push(`- Handoff omitted: positive=${selectedHandoff.omitted.positive}, skip=${selectedHandoff.omitted.skip}, unknown=${selectedHandoff.omitted.unknown}`);
   }
 
-  appendSection("Runnable Pending Frontier", runnable, 1_024, 512);
+  appendSection("Runnable Pending Frontier", runnable, 1_024, 512, 1_024);
   appendSection("Blocked Todo Tasks", blocked.slice(0, 8), 512, 512);
   appendSection("Recently Completed", completed, 512, 1_024);
 
@@ -1017,6 +1044,7 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     "",
     "## Recovery Hint",
     "Use `todo list`/`todo get` for live task state. Use `session_history` with scope=current_session for bounded recovery and `resource` for exact agent://, session://, pr://, issue://, skill://, or rule:// references.",
+    "Checkpoint ID identifies this saved summary, not a rollback or a requestId. Read it with session_history action=read_checkpoint and checkpointId=<Checkpoint ID>; use the returned resourceUri/entryId for exact entry reads, never substitute the checkpoint UUID into a session:// entry URI.",
     "</recovery_capsule>",
   );
 

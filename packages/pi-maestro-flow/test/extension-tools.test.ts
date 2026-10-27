@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import { getPiHostMode } from "pi-maestro-settings-core/v1";
 import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import registerMaestroExtension, {
@@ -43,6 +43,7 @@ import {
   getTeammateChildExtensions,
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
+  registerTeammateChildProxyCaller,
 } from "pi-maestro-teammate/v1/child-extensions";
 
 type ChineseCommand = { handler: (args: string, ctx: ExtensionContext) => Promise<void> | void };
@@ -1350,6 +1351,122 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   } as ExtensionContext;
   await assert.doesNotReject(() => runHooks("agent_settled", {}, settledFailureCtx) as Promise<unknown>);
   assert.match(settledFailureNotifications[0] ?? "", /Child settled context compaction failed/);
+});
+
+test("child explicit reset owns its manual checkpoint after completed-turn threshold cancellation", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "child-new-context-settlement-"));
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousCorrelation = process.env.PI_TEAMMATE_CORRELATION_ID;
+  const tools: ToolDefinition[] = [];
+  const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
+  const sent: Array<{ message: string; options: unknown }> = [];
+  const notices: string[] = [];
+  const manager = SessionManager.inMemory(cwd);
+  manager.appendMessage({ role: "user", content: "Own this child reset", timestamp: 1 });
+  const api = new Proxy({} as ExtensionAPI, {
+    get(_target, property) {
+      if (property === "registerTool") return (tool: ToolDefinition) => tools.push(tool);
+      if (property === "getAllTools") return () => tools;
+      if (property === "getActiveTools") return () => tools.map((tool) => tool.name);
+      if (property === "events") return { on: () => () => {}, emit() {} };
+      if (property === "on") return (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+        const list = handlers.get(name) ?? [];
+        list.push(handler);
+        handlers.set(name, list);
+      };
+      if (property === "sendUserMessage") return (message: string, options: unknown) => {
+        assert.equal(idle, true, "host compact callback must expose idle before starting the continuation");
+        assert.equal(manager.getBranch().at(-1)?.type, "compaction", "checkpoint is committed before continuation");
+        sent.push({ message, options });
+      };
+      return () => undefined;
+    },
+  });
+  const runHooks = async (name: string, event: unknown): Promise<unknown> => {
+    let result: unknown;
+    for (const handler of handlers.get(name) ?? []) {
+      const next = await handler(event, ctx);
+      if (next !== undefined) result = next;
+    }
+    return result;
+  };
+  let idle = false;
+  let pendingMessages = false;
+  let compactOptions: { customInstructions?: string; onComplete?(): void; onError?(error: Error): void } | undefined;
+  const ctx = {
+    cwd, sessionManager: manager,
+    model: { contextWindow: 200_000, maxTokens: 32_000 },
+    isIdle: () => idle,
+    hasPendingMessages: () => pendingMessages,
+    abort() {},
+    compact(options: typeof compactOptions) { compactOptions = options; idle = false; },
+    ui: { notify(message: string) { notices.push(message); }, setStatus() {} },
+  } as unknown as ExtensionContext;
+  let refreshes = 0;
+  const disposeProxy = registerTeammateChildProxyCaller(async <T,>(name: string) => {
+    assert.equal(name, "maestro-new-context-recovery");
+    assert.equal(idle, true, "AgentSession clears its active-run flag before extension settlement");
+    refreshes++;
+    return { content: [], details: {
+      recoveryState: { todo: { stateVersion: 6, revision: 1, tasks: [] },
+        goal: { stateVersion: 2, goals: [] }, plan: { mode: "act", status: "empty", revision: 0, handoffStatus: "none" } },
+    } as T };
+  });
+  try {
+    process.env.PI_TEAMMATE_CHILD = "1";
+    process.env.PI_TEAMMATE_CORRELATION_ID = "explicit-reset-child";
+    registerMaestroExtension(api);
+    await runHooks("session_start", { reason: "new" });
+    const tool = tools.find((tool) => tool.name === "new_context");
+    assert.ok(tool);
+    const receipt = await tool.execute("reset-call", {}, undefined, undefined, ctx);
+    assert.equal((receipt.details as { scheduled: boolean }).scheduled, true);
+    // A successful final turn can defer ordinary native threshold compaction;
+    // this must not cancel the separate, explicitly owned manual reset.
+    await runHooks("context", { messages: [{
+      role: "assistant", content: [{ type: "toolCall", id: "read", name: "read", arguments: {} }],
+      usage: { input: 190_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }, { role: "toolResult", toolCallId: "read", toolName: "read", content: [{ type: "text", text: "done" }] }] });
+    await runHooks("agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text: "scheduled" }], stopReason: "stop" }] });
+    assert.deepEqual(await runHooks("session_before_compact", { reason: "threshold" }), { cancel: true });
+    idle = true;
+    await runHooks("agent_settled", {});
+    assert.equal(refreshes, 1);
+    assert.ok(compactOptions);
+    assert.equal(sent.length, 0, "scheduling compact does not pretend the callback or continuation ran");
+    const result = await runHooks("session_before_compact", {
+      reason: "manual", customInstructions: compactOptions.customInstructions,
+      branchEntries: manager.getBranch(),
+      preparation: { firstKeptEntryId: "old", tokensBefore: 190_000, messagesToSummarize: [], turnPrefixMessages: [],
+        fileOps: { read: new Set(), written: new Set(), edited: new Set() } },
+    }) as { compaction?: { summary: string; firstKeptEntryId: string; details: unknown } };
+    assert.ok(result.compaction, notices.join("\n"));
+    assert.match(result.compaction.summary, /recovery_capsule/);
+    manager.appendCompaction(result.compaction.summary, result.compaction.firstKeptEntryId, 190_000, result.compaction.details);
+    await runHooks("session_compact", {});
+    idle = true;
+    compactOptions.onComplete?.();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.options, undefined, "idle recovery starts a prompt instead of a follow-up-only queue");
+    assert.match(sent[0]!.message, /recovery|Todo/i);
+
+    // A newly queued user turn still cancels the next scheduled reset at the
+    // same real idle boundary, with no broker call or second continuation.
+    await tool.execute("reset-call-2", {}, undefined, undefined, ctx);
+    compactOptions = undefined;
+    pendingMessages = true;
+    await runHooks("agent_settled", {});
+    assert.equal(compactOptions, undefined);
+    assert.equal(refreshes, 1);
+    assert.equal(sent.length, 1);
+  } finally {
+    disposeProxy();
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousCorrelation === undefined) delete process.env.PI_TEAMMATE_CORRELATION_ID;
+    else process.env.PI_TEAMMATE_CORRELATION_ID = previousCorrelation;
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("intelligence shutdown closes browser entries before an exclusively owned bridge", async () => {

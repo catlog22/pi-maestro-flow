@@ -11,6 +11,7 @@ import {
   type ExtensionContext,
   type SessionBeforeCompactEvent,
   type SessionCompactEvent,
+  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
   getTodoCompactionSnapshot,
@@ -53,7 +54,10 @@ import {
   summaryOutputTokenLimit,
 } from "./compaction-threshold.ts";
 
+import { NEW_CONTEXT_CONTINUATION_PREFIX } from "./recovery-focus.ts";
+
 const DETAILS_KIND = "maestro-session-checkpoint";
+const MAX_RECOVERY_USER_ENTRIES = 4;
 /** Details v4 carries the deterministic new-context trigger metadata. */
 const DETAILS_VERSION = 4;
 const PREVIOUS_DETAILS_VERSION = 3;
@@ -592,6 +596,13 @@ export interface MaestroRecoveryState {
   workflow?: WorkflowRecoveryIdentity;
 }
 
+export interface MaestroConversationRecovery {
+  recentUserEntryIds: string[];
+  initialUserEntryId?: string;
+  previousCheckpointEntryId?: string;
+  omittedUserMessages: number;
+}
+
 export interface MaestroCompactionDetails {
   kind: typeof DETAILS_KIND;
   schemaVersion: typeof DETAILS_VERSION | typeof PREVIOUS_DETAILS_VERSION | 2 | typeof LEGACY_DETAILS_VERSION;
@@ -615,6 +626,8 @@ export interface MaestroCompactionDetails {
    * toolResult session entry and its exact session:// recovery URI.
    */
   evidenceIndex?: EvidenceReceipt[];
+  /** Exact source pointers, not a fact ledger or new execution authorization. */
+  conversationRecovery?: MaestroConversationRecovery;
   /** Measured standalone summary request; absent on older or deterministic checkpoints. */
   summaryMetrics?: SummaryMetrics;
   /**
@@ -884,6 +897,50 @@ Use this EXACT format:
 - Added References:
 - Superseded References:`;
 
+function recoveryEntryId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(value);
+}
+
+function collectConversationRecovery(entries: readonly SessionEntry[], actorId: string): MaestroConversationRecovery | undefined {
+  const userIds: string[] = [];
+  let previousCheckpointEntryId: string | undefined;
+  for (const entry of entries) {
+    if (!recoveryEntryId(entry.id)) continue;
+    if (entry.type === "compaction") previousCheckpointEntryId = entry.id;
+    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    const content = entry.message.content;
+    const text = typeof content === "string"
+      ? content
+      : content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+    // Our own wake-up is not a new task or user decision across repeated resets.
+    if (text.startsWith(NEW_CONTEXT_CONTINUATION_PREFIX)) continue;
+    userIds.push(entry.id);
+  }
+  if (!userIds.length && !previousCheckpointEntryId) return undefined;
+  const recentUserEntryIds = userIds.slice(-MAX_RECOVERY_USER_ENTRIES).reverse();
+  const initialUserEntryId = actorId !== "root" ? userIds[0] : undefined;
+  const retained = new Set([...recentUserEntryIds, ...(initialUserEntryId ? [initialUserEntryId] : [])]);
+  return {
+    recentUserEntryIds,
+    ...(initialUserEntryId ? { initialUserEntryId } : {}),
+    ...(previousCheckpointEntryId ? { previousCheckpointEntryId } : {}),
+    omittedUserMessages: userIds.length - retained.size,
+  };
+}
+
+function normalizeConversationRecovery(value: unknown): MaestroConversationRecovery | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<MaestroConversationRecovery>;
+  if (!Array.isArray(candidate.recentUserEntryIds)) return undefined;
+  return {
+    recentUserEntryIds: [...new Set(candidate.recentUserEntryIds.filter(recoveryEntryId))].slice(0, MAX_RECOVERY_USER_ENTRIES),
+    ...(recoveryEntryId(candidate.initialUserEntryId) ? { initialUserEntryId: candidate.initialUserEntryId } : {}),
+    ...(recoveryEntryId(candidate.previousCheckpointEntryId) ? { previousCheckpointEntryId: candidate.previousCheckpointEntryId } : {}),
+    omittedUserMessages: Number.isSafeInteger(candidate.omittedUserMessages) && candidate.omittedUserMessages! >= 0
+      ? candidate.omittedUserMessages! : 0,
+  };
+}
+
 /**
  * Capture the complete runtime details exactly once for a compaction request.
  * Deterministic summary producers (notably new-context) receive this same
@@ -917,6 +974,9 @@ export async function captureMaestroCompactionDetails(
     currentReferences,
     checkpointId,
   );
+  const conversationRecovery = dependencies.newContext
+    ? collectConversationRecovery(event.branchEntries, dependencies.newContext.actorId)
+    : undefined;
   const evidenceIndex = mergeEvidenceReceipts(
     previousDetails?.evidenceIndex ?? [],
     collectEvidenceReceipts({
@@ -940,6 +1000,7 @@ export async function captureMaestroCompactionDetails(
     activeSkills,
     references,
     ...(evidenceIndex.length ? { evidenceIndex } : {}),
+    ...(conversationRecovery ? { conversationRecovery } : {}),
     knowhowPath,
     ...(dependencies.newContext ? {
       newContext: {
@@ -1293,6 +1354,7 @@ export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompac
     plan,
     newContext,
     ...(evidenceIndex ? { evidenceIndex } : { evidenceIndex: undefined }),
+    conversationRecovery: normalizeConversationRecovery(candidate.conversationRecovery),
     activeSkills: candidate.activeSkills.map((skill) => ({ ...skill, requiredFiles: [...skill.requiredFiles], deferredFiles: [...skill.deferredFiles] })),
     references: candidate.references.map((reference) => ({ ...reference })),
   };
