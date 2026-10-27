@@ -708,6 +708,56 @@ test("REL-4: a silent child after result-ready settles on the lifecycle deadline
   assert.equal(progress.at(-1)?.resultReadyAt, undefined);
 });
 
+for (const { answered, malformed } of [
+  { answered: false, malformed: false },
+  { answered: true, malformed: false },
+  { answered: false, malformed: true },
+]) {
+  test(`lifecycle deadline reports recovery stage and proxy ${malformed ? "malformed metadata" : answered ? "enqueued reply" : "receive"}`, async () => {
+    const completions: SingleResult[] = [];
+    const spawnChildProcess = (() => {
+      const handle = createFakeChild();
+      Object.assign(handle.child, {
+        connected: true,
+        send(_message: unknown, callback: (error: Error | null) => void) { callback(null); return true; },
+      });
+      queueMicrotask(() => {
+        handle.child.emit("message", {
+          type: "teammate_compaction_state", producer: "new-context",
+          recoveryId: "session:new-context:1", generation: 1, phase: "pending",
+          reason: "refreshing-root-recovery",
+        });
+        handle.stdout.write(line(resultReadyTurnEnd("reset scheduled; not verified")));
+        handle.child.emit("message", {
+          type: "teammate_proxy_request",
+          tool: malformed ? { toString: 1 } : "maestro-new-context-recovery",
+          requestId: malformed ? { toString: 1 } : "recovery-trace",
+        });
+      });
+      return handle.child;
+    }) as unknown as SpawnSeam;
+    await runSingleTeammate(
+      { agent: "general", task: "trace stalled recovery", context: "fresh" },
+      {
+        baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40,
+        onChildRequest(request, reply) {
+          if (answered) reply({ type: "teammate_proxy_result", requestId: request.requestId, result: {} });
+        },
+        onTurnComplete: (entry) => completions.push(entry),
+      },
+    );
+    await delay(160);
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0].terminalStatus, "terminated");
+    const diagnostic = completions[0].messages.at(-1)?.content ?? "";
+    assert.match(diagnostic, /compaction=new-context\/pending/);
+    assert.match(diagnostic, /compactionReason=refreshing-root-recovery/);
+    assert.ok(diagnostic.includes(malformed
+      ? "lastProxy=unknown/received/unknown"
+      : `lastProxy=maestro-new-context-recovery/${answered ? "reply-enqueued" : "received"}/recovery-trace`));
+  });
+}
+
 test("REL-4: agent_settled confirms lifecycle after agent_end", async () => {
   const completions: SingleResult[] = [];
   let handle: FakeChildHandle | undefined;
@@ -1083,6 +1133,71 @@ test("compaction recovery: each advanced phase gets a full deadline for the cont
   }
 });
 
+test("explicit reset survives the scheduling tool's next turn until checkpoint and continuation", async () => {
+  const parentSession = path.join(os.tmpdir(), `teammate-new-context-parent-${Date.now()}.jsonl`);
+  fs.writeFileSync(parentSession, "{}\n");
+  let handle: FakeChildHandle | undefined;
+  let checkpointCommitted = false;
+  let continuationStarted = false;
+  let completedBeforeReset = false;
+  const completions: SingleResult[] = [];
+  let resolveCompletion!: () => void;
+  const completed = new Promise<void>((resolve) => { resolveCompletion = resolve; });
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    const publish = (phase: string) => handle!.child.emit("message", {
+      type: "teammate_compaction_state", producer: "new-context",
+      recoveryId: "session:new-context:1", generation: 1, phase,
+    });
+    queueMicrotask(() => {
+      handle!.stdout.write(line({ type: "agent_start" }));
+      handle!.stdout.write(line({ type: "turn_start" }));
+      // new_context runs as a tool, before the assistant's final no-tool turn.
+      publish("pending");
+      handle!.stdout.write(line({ type: "turn_start" }));
+      handle!.stdout.write(line(resultReadyTurnEnd("reset scheduled; not verified")));
+      // The child re-announces ownership after its async root-state refresh.
+      publish("pending");
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      setTimeout(() => {
+        checkpointCommitted = true;
+        publish("completed");
+        publish("continuation");
+        continuationStarted = true;
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line({ type: "turn_start" }));
+        handle!.stdout.write(line(resultReadyTurnEnd("verified after checkpoint")));
+        handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+        handle!.stdout.write(line({ type: "agent_settled" }));
+      }, 20);
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+  try {
+    const result = await runSingleTeammate(
+      { agent: "general", task: "explicit reset", context: "fork" },
+      {
+        baseCwd: process.cwd(), parentSessionFile: parentSession, spawnChildProcess,
+        outputLimitRecoveryTimeoutMs: 200,
+        onTurnComplete(entry) {
+          completedBeforeReset = !checkpointCommitted || !continuationStarted;
+          completions.push(entry);
+          resolveCompletion();
+        },
+      },
+    );
+    await completed;
+    assert.equal(completedBeforeReset, false, "the child must not seal before checkpoint commit and continuation consumption");
+    assert.equal(result.exitCode, 0);
+    assert.equal(completions[0]?.messages.at(-1)?.content, "verified after checkpoint");
+    assert.equal(completions.length, 1);
+    assert.equal(handle!.killed(), true);
+  } finally {
+    fs.rmSync(parentSession, { force: true });
+  }
+});
+
 test("receipt-capable compaction ignores unrelated turns and closes only on the matching wake", async () => {
   let handle: FakeChildHandle | undefined;
   const deadlineAt = Date.now() + 500;
@@ -1414,9 +1529,11 @@ test("compaction recovery: a missing continuation fails instead of publishing em
       handle!.child.emit("message", {
         type: "teammate_compaction_state",
         recoveryId: "session:stalled-compaction",
+        producer: "new-context",
         generation: 1,
         phase: "pending",
       });
+      handle!.stdout.write(line({ type: "turn_start" }));
       handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
       handle!.stdout.write(line({ type: "agent_settled" }));
     });
@@ -1442,15 +1559,18 @@ test("compaction recovery: cancelled explicit reset clears the parent wait witho
       handle!.child.emit("message", {
         type: "teammate_compaction_state",
         recoveryId: "session:explicit-reset",
+        producer: "new-context",
         generation: 1,
         phase: "pending",
       });
+      handle!.stdout.write(line({ type: "turn_start" }));
       handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
       handle!.stdout.write(line({ type: "agent_settled" }));
       setTimeout(() => {
         handle!.child.emit("message", {
           type: "teammate_compaction_state",
           recoveryId: "session:explicit-reset",
+          producer: "new-context",
           generation: 1,
           phase: "cancelled",
           reason: "a newer message is pending",

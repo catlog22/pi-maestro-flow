@@ -16,6 +16,7 @@ import {
   FAILED_AGENT_RETENTION_MS,
 } from "../src/extension/index.ts";
 import { dispatchChildIpcMessage } from "../src/runs/execution.ts";
+import { createChildProxyRequest, resolveChildProxyRequest } from "../src/extension/teammate-core.ts";
 import {
   getTeammateChildExtensions,
   getTeammateChildToolBroker,
@@ -280,6 +281,157 @@ test("unhandled child request reply failure cannot escape the IPC callback", () 
     () => { throw new Error("channel closed"); },
   ));
   assert.equal(events[1].type, "teammate_reply_delivery_failed");
+});
+
+for (const { label, message, expected } of [
+  {
+    label: "recovery proxy",
+    message: { type: "teammate_proxy_request", requestId: "recovery-preflight", tool: "maestro-new-context-recovery" },
+    expected: {
+      type: "teammate_proxy_result", requestId: "recovery-preflight",
+      result: {
+        content: [{ type: "text", text: "Parent child-request dispatch failed: catalog preflight failed" }],
+        isError: true, details: {},
+      },
+    },
+  },
+  {
+    label: "permission",
+    message: { type: "teammate_interaction_request", requestId: "permission-preflight", interaction: "permission" },
+    expected: {
+      type: "teammate_interaction_response", requestId: "permission-preflight",
+      result: { action: "deny", reason: "Parent child-request dispatch failed: catalog preflight failed" },
+    },
+  },
+  {
+    label: "question",
+    message: { type: "teammate_interaction_request", requestId: "question-preflight", interaction: "question" },
+    expected: {
+      type: "teammate_interaction_response", requestId: "question-preflight",
+      result: { action: "cancel", reason: "Parent child-request dispatch failed: catalog preflight failed" },
+    },
+  },
+  {
+    label: "RPC UI",
+    message: { type: "teammate_rpc_ui_request", id: "ui-preflight" },
+    expected: { type: "extension_ui_response", id: "ui-preflight", cancelled: true },
+  },
+]) {
+  test(`child IPC dispatch answers a throwing ${label} handler`, () => {
+    const replies: unknown[] = [];
+    const events: Array<Record<string, unknown>> = [];
+    assert.equal(dispatchChildIpcMessage(
+      message,
+      () => { throw new Error("catalog preflight failed"); },
+      (event) => events.push(event),
+      (reply) => replies.push(reply),
+    ), "request");
+    assert.deepEqual(replies, [expected]);
+    assert.equal(events[0].type, "teammate_reply_delivery_failed");
+    assert.equal(events[0].error, "catalog preflight failed");
+  });
+}
+
+test("child IPC dispatch does not reply again when a handler throws after replying", () => {
+  const replies: unknown[] = [];
+  const events: Array<Record<string, unknown>> = [];
+  const response = { type: "teammate_proxy_result", requestId: "already-answered", result: { isError: true } };
+  dispatchChildIpcMessage(
+    { type: "teammate_proxy_request", requestId: "already-answered", tool: "todo" },
+    (_event, reply) => { reply(response); throw new Error("after reply"); },
+    (event) => events.push(event),
+    (reply) => replies.push(reply),
+  );
+  assert.deepEqual(replies, [response]);
+  assert.equal(events[0].error, "after reply");
+});
+
+test("throwing cancellation handlers remain one-way", () => {
+  const replies: unknown[] = [];
+  const events: Array<Record<string, unknown>> = [];
+  dispatchChildIpcMessage(
+    { type: "teammate_proxy_cancel", requestId: "cancel-throw" },
+    () => { throw new Error("cancel failed"); },
+    (event) => events.push(event),
+    (reply) => replies.push(reply),
+  );
+  assert.deepEqual(replies, []);
+  assert.equal(events[0].error, "cancel failed");
+});
+
+test("unhandled RPC UI requests use the native cancellation envelope", () => {
+  const replies: unknown[] = [];
+  dispatchChildIpcMessage(
+    { type: "teammate_rpc_ui_request", id: "ui-unhandled" },
+    undefined,
+    undefined,
+    (reply) => replies.push(reply),
+  );
+  assert.deepEqual(replies, [{ type: "extension_ui_response", id: "ui-unhandled", cancelled: true }]);
+});
+
+test("a failing unhandled-request observer cannot strand the child", () => {
+  const replies: unknown[] = [];
+  assert.doesNotThrow(() => dispatchChildIpcMessage(
+    { type: "teammate_proxy_request", requestId: "observer-throw", tool: "todo" },
+    undefined,
+    () => { throw new Error("observer failed"); },
+    (reply) => replies.push(reply),
+  ));
+  assert.equal(replies.length, 1);
+});
+
+for (const fails of [false, true]) {
+  test(`recovery proxy promise settles and clears its timer when dispatch ${fails ? "throws" : "replies asynchronously"}`, async () => {
+    const pending: Parameters<typeof createChildProxyRequest>[0] = new Map();
+    const result = await createChildProxyRequest(
+      pending,
+      "recovery-ipc-roundtrip",
+      { type: "teammate_proxy_request", requestId: "recovery-ipc-roundtrip", tool: "maestro-new-context-recovery" },
+      (message, sent) => {
+        queueMicrotask(() => {
+          dispatchChildIpcMessage(
+            message,
+            (_request, reply) => {
+              if (fails) throw new Error("root snapshot preflight failed");
+              queueMicrotask(() => reply({
+                type: "teammate_proxy_result", requestId: "recovery-ipc-roundtrip",
+                result: { content: [{ type: "text", text: "refreshed" }], details: {} },
+              }));
+            },
+            undefined,
+            (response) => {
+              assert.ok(response && typeof response === "object" && "requestId" in response && "result" in response);
+              assert.equal(typeof response.requestId, "string");
+              assert.equal(resolveChildProxyRequest(pending, String(response.requestId), response.result), true);
+            },
+          );
+          sent(null);
+        });
+        return true;
+      },
+      1000,
+    );
+    assert.equal(pending.size, 0);
+    assert.deepEqual(result, fails ? {
+      content: [{ type: "text", text: "Parent child-request dispatch failed: root snapshot preflight failed" }],
+      isError: true, details: {},
+    } : { content: [{ type: "text", text: "refreshed" }], details: {} });
+  });
+}
+
+test("failure replies retain delivery errors without escaping the IPC callback", () => {
+  const events: Array<Record<string, unknown>> = [];
+  assert.doesNotThrow(() => dispatchChildIpcMessage(
+    { type: "teammate_proxy_request", requestId: "failure-channel-closed", tool: "todo" },
+    () => { throw new Error("preflight failed"); },
+    (event) => events.push(event),
+    () => { throw new Error("channel closed"); },
+  ));
+  assert.deepEqual(events, [{
+    type: "teammate_reply_delivery_failed", requestId: "failure-channel-closed",
+    error: "preflight failed", replyError: "channel closed",
+  }]);
 });
 
 test("headless main session denies permission interactions", async () => {

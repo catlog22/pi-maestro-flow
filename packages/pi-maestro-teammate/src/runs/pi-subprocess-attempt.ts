@@ -530,6 +530,7 @@ function bindChildIpcRelay(
   correlationId: string,
   options: RunTeammateOptions,
   onActivity?: (message: Record<string, unknown>) => void,
+  onReply?: (request: Record<string, unknown>) => void,
 ): void {
   child.on("message", (msg: unknown) => {
     // PERFSEC-001: process.send(null) or malformed envelopes must not crash
@@ -561,6 +562,7 @@ function bindChildIpcRelay(
         if (!sendChildIpcMessage(child, reply as Record<string, unknown>)) {
           throw new Error("Child IPC channel rejected the reply envelope.");
         }
+        onReply?.(m);
       },
     );
   });
@@ -1026,6 +1028,8 @@ export async function runSingleAttempt(
       );
     }
 
+    let lastCompactionReason: string | undefined;
+    let lastChildProxy: { requestId: string; tool: string; phase: "received" | "reply-enqueued" } | undefined;
     const observerIncarnation = randomUUID();
     const observerSequence = nextTeammateHostSequence();
     const observeBoundary = (event: Record<string, unknown>): void => {
@@ -1047,6 +1051,13 @@ export async function runSingleAttempt(
     if (useIpc) {
       bindChildIpcRelay(child, correlationId, options, (message) => {
         state.receivedFirstActivity = true;
+        if (message.type === "teammate_proxy_request") {
+          lastChildProxy = {
+            requestId: typeof message.requestId === "string" ? message.requestId : "unknown",
+            tool: typeof message.tool === "string" ? message.tool.slice(0, 128) : "unknown",
+            phase: "received",
+          };
+        }
         const compactionCapability = childCompactionCapability(message);
         if (compactionCapability) {
           if (compactionCapability.runtimeGeneration === (options.runtimeGeneration ?? 0)) {
@@ -1056,6 +1067,7 @@ export async function runSingleAttempt(
         }
         const compactionEvent = childCompactionStateEvent(message);
         if (compactionEvent) {
+          lastCompactionReason = compactionEvent.reason?.slice(0, 128);
           handleChildCompactionState(compactionEvent);
           observeBoundary({ type: "host_compaction", phase: compactionEvent.phase });
           return;
@@ -1067,6 +1079,8 @@ export async function runSingleAttempt(
         }
         if (message.type === "proxy_request") addReplayEvidence("proxy-request", "child-proxy-request");
         else if (!isReplayNeutralChildIpcMessage(message)) addReplayEvidence("unknown-ipc", "unrecognized-child-ipc");
+      }, (request) => {
+        if (lastChildProxy && lastChildProxy.requestId === request.requestId) lastChildProxy.phase = "reply-enqueued";
       });
     }
 
@@ -1540,7 +1554,11 @@ export async function runSingleAttempt(
           + `(agent=${params.agent}, correlationId=${correlationId}, expected=agent_settled, `
           + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}, `
           + `inFlightTools=${state.inFlightToolCount}, completedTools=${state.completedToolCount}, `
-          + `lastStopReason=${state.lastAssistantStopReason ?? "unknown"}); the child process was terminated.`,
+          + `lastStopReason=${state.lastAssistantStopReason ?? "unknown"}, `
+          + `compaction=${state.compactionRecovery ? `${state.compactionRecovery.producer}/${state.compactionRecovery.phase}` : "none"}, `
+          + `compactionReason=${lastCompactionReason ?? "none"}, `
+          + `lastProxy=${lastChildProxy ? `${lastChildProxy.tool}/${lastChildProxy.phase}/${lastChildProxy.requestId.slice(0, 128)}` : "none"}); `
+          + "the child process was terminated.",
       });
       completeTurn(readStructuredOutput(true), true, 0, "terminated");
     };
@@ -2025,9 +2043,13 @@ export async function runSingleAttempt(
       }
       if (state.compactionRecovery
         && state.compactionRecovery.wakeProtocolVersion === undefined
-        && state.compactionRecovery.wakeReceipt === undefined) {
-        // Legacy producers have no correlated consumer receipt, so retain the
-        // prior conservative behavior: any new boundary ends the wait.
+        && state.compactionRecovery.wakeReceipt === undefined
+        && (state.compactionRecovery.producer !== "new-context"
+          || state.compactionRecovery.phase === "continuation")) {
+        // An explicit reset is scheduled by a tool before the final assistant
+        // turn. That turn is not its continuation: keep the obligation until
+        // the checkpoint callback announces continuation (or cancellation).
+        // Other legacy producers retain their prior boundary-based behavior.
         closeActiveCompactionRecovery();
         state.compactionRecovery = undefined;
         compactionSettlementSwallowed = false;
@@ -3469,36 +3491,39 @@ export function dispatchChildIpcMessage(
     || message.type === "teammate_interaction_request"
     || message.type === "teammate_rpc_ui_request";
   if (requestType || message.type === "teammate_proxy_cancel") {
-    if (onRequest) {
-      try {
-        onRequest(message, reply);
-      } catch (error) {
+    let replyAttempted = false;
+    const respond = (response: unknown): void => {
+      replyAttempted = true;
+      reply(response);
+    };
+    try {
+      if (onRequest) {
+        onRequest(message, respond);
+      } else {
+        onEvent?.(message);
+        if (requestType) replyFailedChildRequest(message, respond);
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      let replyError: string | undefined;
+      // A callback can fail before entering its own request handler. Settle
+      // that request, but never synthesize a second reply or answer a cancel.
+      if (requestType && !replyAttempted) {
         try {
-          onEvent?.({
-            type: "teammate_reply_delivery_failed",
-            requestId: message.requestId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        } catch {
-          // Child input cannot escape the parent event loop.
+          replyFailedChildRequest(message, respond, `Parent child-request dispatch failed: ${reason}`);
+        } catch (failure) {
+          replyError = failure instanceof Error ? failure.message : String(failure);
         }
       }
-    } else {
-      onEvent?.(message);
-      if (message.type !== "teammate_proxy_cancel") {
-        try {
-          replyUnhandledChildRequest(message, reply);
-        } catch (error) {
-          try {
-            onEvent?.({
-              type: "teammate_reply_delivery_failed",
-              requestId: message.requestId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          } catch {
-            // Failed reply remains contained in the child IPC callback.
-          }
-        }
+      try {
+        onEvent?.({
+          type: "teammate_reply_delivery_failed",
+          requestId: message.requestId ?? message.id,
+          error: reason,
+          ...(replyError === undefined ? {} : { replyError }),
+        });
+      } catch (observerError) {
+        logDiagnosticError("[pi-maestro-teammate] child request failure observer failed", observerError);
       }
     }
     return "request";
@@ -3507,10 +3532,19 @@ export function dispatchChildIpcMessage(
   return "event";
 }
 
-function replyUnhandledChildRequest(
+function replyFailedChildRequest(
   message: Record<string, unknown>,
   reply: (message: unknown) => void,
+  reason = "No parent child-request handler is available.",
 ): void {
+  if (message.type === "teammate_rpc_ui_request") {
+    reply({
+      type: "extension_ui_response",
+      id: typeof message.id === "string" ? message.id : randomUUID(),
+      cancelled: true,
+    });
+    return;
+  }
   const requestId = typeof message.requestId === "string" ? message.requestId : randomUUID();
   if (message.type === "teammate_interaction_request") {
     const permission = message.interaction === "permission";
@@ -3518,8 +3552,8 @@ function replyUnhandledChildRequest(
       type: "teammate_interaction_response",
       requestId,
       result: permission
-        ? { action: "deny", reason: "No parent child-request handler is available." }
-        : { action: "cancel", reason: "No parent child-request handler is available." },
+        ? { action: "deny", reason }
+        : { action: "cancel", reason },
     });
     return;
   }
@@ -3527,7 +3561,7 @@ function replyUnhandledChildRequest(
     type: "teammate_proxy_result",
     requestId,
     result: {
-      content: [{ type: "text", text: "No parent child-request handler is available." }],
+      content: [{ type: "text", text: reason }],
       isError: true,
       details: {},
     },
