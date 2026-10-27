@@ -75,8 +75,20 @@ export interface SessionHistorySearchOptions extends SessionHistoryOptions {
     /** Zero-based unique candidate offset; independent of match pagination. */
     scanOffset?: number;
 }
-export type SessionHistoryReadOptions = SessionHistoryOptions;
-export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
+export interface SessionHistoryReadOptions extends SessionHistoryOptions {
+    /** Zero-based projected entry offset within the selected turn or entry. */
+    offset?: number;
+}
+export interface SessionHistoryCompactionOptions extends Omit<SessionHistoryOptions, "include"> {
+    /** Zero-based checkpoint offset in the newest-first timeline. */
+    offset?: number;
+}
+/** Minimal allowlisted identity, never the persisted recovery state. */
+export interface SessionHistoryCheckpoint {
+    checkpointId: string;
+    previousCheckpointId?: string;
+    source: "compaction" | "new-context";
+}
 export interface SessionHistorySession {
     sessionId: string;
     resourceUri: string;
@@ -97,6 +109,8 @@ export interface SessionHistoryEntry {
     kind: SessionHistoryInclude;
     text: string;
     timestamp: number;
+    /** Present only for recognized Maestro compaction details. */
+    checkpoint?: SessionHistoryCheckpoint;
 }
 export interface SessionHistoryTurn {
     sessionId: string;
@@ -152,6 +166,8 @@ export interface SessionHistoryCompactionResult extends ScanMetrics {
     generation?: number;
     checkpoints: readonly SessionHistoryEntry[];
     checkpointCount: number;
+    hasMore: boolean;
+    nextOffset?: number;
 }
 export interface SessionHistoryEntryRead {
     sessionId: string;
@@ -165,6 +181,8 @@ export interface SessionHistoryReadResult extends ScanMetrics {
     generation?: number;
     sessionId: string;
     found: boolean;
+    hasMore: boolean;
+    nextOffset?: number;
     selectedTurn?: number;
     selectedEntryId?: string;
     turn?: SessionHistoryTurn;
@@ -173,6 +191,8 @@ export interface SessionHistoryReadResult extends ScanMetrics {
 export interface SessionHistoryReadRequest extends SessionHistoryReadOptions {
     sessionId: string;
     entryId?: string;
+    /** Exact checkpoint identity or compaction entry id; never a text search. */
+    checkpointId?: string;
     turn?: number;
 }
 export declare function sessionHistoryUri(sessionId: string): string;
@@ -206,4 +226,6 @@ export declare function listSessionCompactions(source: SessionHistoryInventorySo
 export declare function readSessionHistory(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, request: SessionHistoryReadRequest): Promise<SessionHistoryReadResult>;
 export declare function readSessionHistoryEntry(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, sessionId: string, entryId: string, options?: SessionHistoryReadOptions): Promise<SessionHistoryEntryRead | undefined>;
 export declare function readSessionHistoryTurn(source: SessionHistoryInventorySource | SessionHistoryServiceOptions, sessionId: string, turn: number, options?: SessionHistoryReadOptions): Promise<SessionHistoryTurn | undefined>;
+/** Structured identity wins; exact summary labels retain legacy lookup support. */
+export declare function sessionHistoryCheckpoint(entry: SessionHistoryEntry): SessionHistoryCheckpoint | undefined;
 export {};

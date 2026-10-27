@@ -10,7 +10,9 @@ import {
   MAX_SESSION_HISTORY_SNIPPET_CHARS,
   SESSION_HISTORY_INCLUDES,
   SessionHistoryService,
+  sessionHistoryCheckpoint,
   sessionEntryUri,
+  type SessionHistoryEntry,
   type SessionHistoryInventoryEntry,
 } from "../src/transcript/session-history.ts";
 
@@ -121,6 +123,123 @@ test("compaction timeline is newest-first, bounded, and keeps exact entry URIs",
   assert.equal(result.checkpoints[0]?.kind, "compaction");
   assert.equal(result.truncated, true);
   assert.equal(result.omissions.some((item) => item.reason === "result-limit"), true);
+});
+
+test("checkpoint metadata allowlists recognized compactions and exact lookup ignores references and text decoys", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = "42168481-e397-4b46-adf6-fbbabc1c2f7e";
+  const capsule = (id: string) => `<recovery_capsule version="2">\n- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.\n- Checkpoint ID: ${id}\n- Previous Checkpoint: ${target}\n</recovery_capsule>`;
+  const rows: unknown[] = [header("checkpoints"), user("u1", null, "start")];
+  let parent = "u1";
+  const add = (id: string, summary: string, details?: unknown) => {
+    rows.push({ ...(compaction(id, parent, "2026-08-01T00:00:04.000Z", summary) as object), ...(details === undefined ? {} : { details }) });
+    parent = id;
+  };
+  for (let index = 0; index < 25; index++) add(`decoy-${index}`, capsule(`other-${index}`));
+  add("ordinary", capsule("summary-spoof"), {
+    kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId: target, previousCheckpointId: "previous",
+    projectRoot: "/private/project", todo: { secret: "private-state" }, knowhowPath: "/private/checkpoint",
+    newContext: { source: "unknown-producer", carryForward: "private-carry" },
+  });
+  add("reset", "ordinary looking summary", {
+    kind: "maestro-session-checkpoint", schemaVersion: 3, checkpointId: "reset-id",
+    previousCheckpointId: "invalid/path", newContext: { source: "command", secret: "private-state" },
+  });
+  add("legacy", capsule("legacy-id"));
+  add("legacy-ordinary", "## Session\r\n- Checkpoint ID:\t legacy-ordinary-id \t\r\n- Previous Checkpoint:previous-id  \r\nDiscuss the Maestro New Context Recovery Capsule, but this is an ordinary summary.");
+  add("legacy-tight", "- Checkpoint ID:tight-id\n- Previous Checkpoint:\t previous-id\t");
+  add("native", "native compaction");
+  for (const [index, details] of [
+    { kind: "unknown", schemaVersion: 4, checkpointId: "bad-kind" },
+    { kind: "maestro-session-checkpoint", schemaVersion: 5, checkpointId: "future" },
+    { kind: "maestro-session-checkpoint", schemaVersion: "4", checkpointId: "string-schema" },
+    ...["", " ", "bad/path", "bad\\path", "bad\nline", "x".repeat(513)].map((checkpointId) => ({ kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId })),
+  ].entries()) add(`invalid-${index}`, "native summary", details);
+  const file = writeTranscript(dir, "checkpoints.jsonl", rows);
+  const service = new SessionHistoryService(inventory(file));
+  const read = await service.read({ sessionId: "checkpoints", checkpointId: target });
+  assert.equal(read.found, true);
+  assert.equal(read.selectedEntryId, "ordinary");
+  assert.deepEqual(read.selectedEntry?.entries[0]?.checkpoint, { checkpointId: target, previousCheckpointId: "previous", source: "compaction" });
+  assert.doesNotMatch(JSON.stringify(read), /private|projectRoot|knowhowPath|newContext|details/);
+  const reset = await service.read({ sessionId: "checkpoints", checkpointId: "reset-id" });
+  assert.deepEqual(reset.selectedEntry?.entries[0]?.checkpoint, { checkpointId: "reset-id", source: "new-context" });
+  const legacy = await service.read({ sessionId: "checkpoints", checkpointId: "legacy-id" });
+  assert.equal(legacy.selectedEntryId, "legacy");
+  assert.equal(legacy.selectedEntry?.entries[0]?.checkpoint, undefined);
+  assert.deepEqual(sessionHistoryCheckpoint(legacy.selectedEntry!.entries[0]!), { checkpointId: "legacy-id", previousCheckpointId: target, source: "new-context" });
+  const ordinaryLegacy = await service.read({ sessionId: "checkpoints", checkpointId: "legacy-ordinary-id" });
+  assert.equal(ordinaryLegacy.selectedEntryId, "legacy-ordinary");
+  assert.deepEqual(sessionHistoryCheckpoint(ordinaryLegacy.selectedEntry!.entries[0]!), {
+    checkpointId: "legacy-ordinary-id", previousCheckpointId: "previous-id", source: "compaction",
+  });
+  assert.equal((await service.read({ sessionId: "checkpoints", checkpointId: "tight-id" })).selectedEntryId, "legacy-tight");
+  assert.equal((await service.read({ sessionId: "checkpoints", checkpointId: "native" })).selectedEntryId, "native");
+  for (const checkpointId of ["summary-spoof", "previous", "bad-kind", "future", "string-schema"]) {
+    assert.equal((await service.read({ sessionId: "checkpoints", checkpointId })).found, false);
+  }
+  const all: SessionHistoryEntry[] = [];
+  for (let offset = 0; offset < rows.length; offset += 20) all.push(...(await service.compactions({ offset })).checkpoints);
+  assert.ok(all.filter((entry) => entry.entryId.startsWith("invalid-") || entry.entryId === "native" || entry.entryId === "legacy").every((entry) => entry.checkpoint === undefined));
+});
+
+test("timeline and turn pagination keep bounded pages, totals and remaining-result semantics", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const rows: unknown[] = [header("pages"), user("u", null, "question")];
+  let parent = "u";
+  for (let index = 0; index < 44; index++) {
+    const id = `a-${index}`;
+    rows.push(assistant(id, parent, `answer ${index}`));
+    parent = id;
+  }
+  for (let index = 0; index < 45; index++) {
+    const id = `cp-${String(index).padStart(2, "0")}`;
+    rows.push(compaction(id, parent, "2026-08-01T00:00:04.000Z", `checkpoint ${index}`));
+    parent = id;
+  }
+  const service = new SessionHistoryService(inventory(writeTranscript(dir, "pages.jsonl", rows)));
+  const seenTurns: string[] = [];
+  const seenCheckpoints: string[] = [];
+  for (const offset of [0, 20, 40]) {
+    const timeline = await service.compactions({ offset });
+    assert.equal(timeline.checkpointCount, 45);
+    assert.equal(timeline.checkpoints.length, offset === 40 ? 5 : 20);
+    assert.equal(timeline.hasMore, offset < 40);
+    assert.equal(timeline.nextOffset, offset < 40 ? offset + 20 : undefined);
+    assert.equal(timeline.truncated, offset < 40);
+    assert.equal(timeline.omissionCounts["result-limit"] ?? 0, Math.max(0, 45 - offset - 20));
+    seenCheckpoints.push(...timeline.checkpoints.map((entry) => entry.entryId));
+    const read = await service.read({ sessionId: "pages", turn: 1, include: ["user", "assistant"], offset });
+    assert.equal(read.found, true);
+    assert.equal(read.turn?.rowCount, offset === 40 ? 5 : 20);
+    assert.equal(read.hasMore, offset < 40);
+    assert.equal(read.nextOffset, offset < 40 ? offset + 20 : undefined);
+    assert.equal(read.truncated, offset < 40);
+    assert.equal(read.omissionCounts["result-limit"] ?? 0, Math.max(0, 45 - offset - 20));
+    seenTurns.push(...read.turn!.entries.map((entry) => entry.entryId));
+  }
+  assert.equal(new Set(seenTurns).size, 45);
+  assert.deepEqual(seenCheckpoints, Array.from({ length: 45 }, (_, index) => `cp-${String(44 - index).padStart(2, "0")}`));
+  assert.deepEqual(await service.compactions(), await service.compactions({ offset: 0 }));
+  assert.deepEqual(await service.read({ sessionId: "pages", turn: 1 }), await service.read({ sessionId: "pages", turn: 1, offset: 0 }));
+  const past = await service.read({ sessionId: "pages", turn: 1, offset: Number.MAX_SAFE_INTEGER });
+  assert.equal(past.found, true);
+  assert.deepEqual(past.turn?.entries, []);
+  assert.equal(past.hasMore, false);
+  assert.equal(past.truncated, false);
+  assert.deepEqual((await service.compactions({ offset: 100 })).checkpoints, []);
+  assert.equal((await service.read({ sessionId: "pages", turn: 99, offset: 20 })).found, false);
+  const incomplete = new SessionHistoryService({ entries: inventory(writeTranscript(dir, "incomplete.jsonl", rows)), hasMore: true });
+  assert.equal((await incomplete.compactions({ offset: 40 })).truncated, true);
+  assert.equal((await incomplete.read({ sessionId: "pages", turn: 1, include: ["user", "assistant"], offset: 40 })).truncated, true);
+  for (const offset of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(service.compactions({ offset }), /offset/);
+    await assert.rejects(service.read({ sessionId: "pages", turn: 1, offset }), /offset/);
+  }
+  await assert.rejects(service.compactions({ limit: 21 }), /limit/);
+  await assert.rejects(service.read({ sessionId: "pages", turn: 1, limit: 21 }), /limit/);
 });
 
 test("literal search uses categorical include and tool_result is explicit only", async () => {
@@ -387,8 +506,10 @@ test("search validates options before scanning and non-search rejects search-onl
   await assert.rejects(service.search("needle", { sort: "date" as "source" }), /sort/);
   for (const extra of [{ offset: 0 }, { scanOffset: 0 }, { mode: "literal" }, { sort: "source" }]) {
     await assert.rejects(service.list({ limit: 1, ...extra }), /only for search/);
-    await assert.rejects(service.compactions({ limit: 1, ...extra }), /only for search/);
-    await assert.rejects(service.read({ sessionId: "session", ...extra }), /only for search/);
+    if (!("offset" in extra)) {
+      await assert.rejects(service.compactions({ limit: 1, ...extra }), /only for search/);
+      await assert.rejects(service.read({ sessionId: "session", ...extra }), /only for search/);
+    }
   }
   assert.equal(scans, 0);
 });

@@ -11,7 +11,7 @@ import {
   createSessionHistoryTool,
   executeSessionHistory,
 } from "../src/tools/session-history.ts";
-import { resolveResource } from "../src/tools/resource.ts";
+import { createResourceTool, resolveResource } from "../src/tools/resource.ts";
 import { COMMAND_HISTORY_BOOTSTRAP } from "../src/compaction/recovery-focus.ts";
 import {
   MAX_SESSION_HISTORY_FILES,
@@ -194,6 +194,198 @@ test("session_history prioritizes current and recent workspace sessions beyond t
   }
 });
 
+test("current-session search includes only associated teammates by default and supports opting out", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-associated-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  const teammateDirectory = join(root, "current", "worker");
+  const unrelatedDirectory = join(root, "other", "worker");
+  await mkdir(teammateDirectory, { recursive: true });
+  await mkdir(unrelatedDirectory, { recursive: true });
+  await writeTranscript(current, [header("current-session"), user("root-u", null, "needle alpha beta")]);
+  await writeTranscript(join(teammateDirectory, "child.jsonl"), [
+    header("child-session"),
+    user("child-u", null, "needle beta alpha"),
+    assistant("child-a", "child-u", "child-only evidence"),
+    hidden("child-hidden", "child-a"),
+  ]);
+  await writeTranscript(join(root, "other.jsonl"), [header("other-session"), user("other-u", null, "needle unrelated workspace")]);
+  await writeTranscript(join(unrelatedDirectory, "child.jsonl"), [header("other-child"), user("other-child-u", null, "needle unrelated teammate")]);
+  const ctx = context(root, current);
+  const request = { action: "search", query: "needle" };
+  const combined = JSON.parse(resultText(await executeSessionHistory(request, ctx)));
+  assert.deepEqual(combined.matches.map((match: { sessionId: string; source: string; parentSessionId?: string }) =>
+    [match.sessionId, match.source, match.parentSessionId]), [
+    ["current-session", "current_session", undefined],
+    ["child-session", "teammates", "current-session"],
+  ]);
+  assert.equal(combined.filesRead, 2);
+  assert.equal(combined.coverage, "complete");
+  assert.equal(resultText(await executeSessionHistory(request, ctx)).includes(root), false);
+  const explicit = JSON.parse(resultText(await executeSessionHistory({ ...request, scope: "current_session", includeTeammates: true }, ctx)));
+  assert.deepEqual(explicit, combined);
+  const isolated = JSON.parse(resultText(await executeSessionHistory({ ...request, includeTeammates: false }, ctx)));
+  assert.deepEqual(isolated.matches.map((match: { sessionId: string }) => match.sessionId), ["current-session"]);
+  assert.equal(isolated.filesRead, 1);
+  assert.equal("source" in isolated.matches[0], false);
+  const terms = JSON.parse(resultText(await executeSessionHistory({ action: "search", query: "alpha beta", mode: "terms", sort: "relevance", offset: 1, limit: 1 }, ctx)));
+  assert.equal(terms.matchCount, 2);
+  assert.equal(terms.matches[0].sessionId, "child-session");
+  const childOnly = JSON.parse(resultText(await executeSessionHistory({ action: "search", query: "child-only evidence" }, ctx)));
+  assert.equal(childOnly.matches[0].source, "teammates");
+  const resource = await resolveResource(childOnly.matches[0].resourceUri, root, undefined, {
+    sessionHistory: createSessionHistoryInventoryProvider(ctx, "all"),
+  });
+  assert.match(resource.content, /child-only evidence/);
+  assert.doesNotMatch(resource.content, /must stay hidden|do not expose|secret-path/);
+  const childTurn = JSON.parse(resultText(await executeSessionHistory({ action: "read_turn", scope: "teammates", sessionId: "child-session", turn: 1 }, ctx)));
+  assert.equal(childTurn.found, true);
+  const rootOnlyRead = JSON.parse(resultText(await executeSessionHistory({ action: "read_turn", sessionId: "child-session", turn: 1 }, ctx)));
+  assert.equal(rootOnlyRead.found, false);
+  const workspace = JSON.parse(resultText(await executeSessionHistory({ ...request, scope: "workspace_sessions" }, ctx)));
+  assert.deepEqual(workspace.matches.map((match: { sessionId: string }) => match.sessionId), ["current-session", "other-session"]);
+  const teammateOnly = JSON.parse(resultText(await executeSessionHistory({ ...request, scope: "teammates" }, ctx)));
+  assert.deepEqual(teammateOnly.matches.map((match: { sessionId: string }) => match.sessionId), ["child-session"]);
+  const noHostId = { cwd: root, sessionManager: { getSessionFile: () => current } } as unknown as ExtensionContext;
+  const inferred = JSON.parse(resultText(await executeSessionHistory(request, noHostId)));
+  assert.deepEqual(inferred.matches, combined.matches);
+});
+
+test("exact teammate resources remain readable when workspace sessions fill the scan budget", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-resource-teammate-budget-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "000-current.jsonl");
+  await writeTranscript(current, [header("current-session"), user("root-u", null, "current request")]);
+  await Promise.all(Array.from({ length: MAX_SESSION_HISTORY_FILES }, (_, index) => writeTranscript(
+    join(root, `2026-10-01_archive-${index}.jsonl`),
+    [header(`archive-${index}`), user(`archive-u-${index}`, null, "unrelated workspace")],
+  )));
+  const childId = "late-child-session";
+  const childDirectory = join(root, "000-current", "worker");
+  await mkdir(childDirectory, { recursive: true });
+  await writeTranscript(join(childDirectory, `2026-10-12_${childId}.jsonl`), [
+    header(childId), user("child-u", null, "child request"),
+    assistant("child-a", "child-u", "late-child-evidence answer"),
+    { type: "message", id: "child-r", parentId: "child-a", timestamp: "2026-08-01T00:00:03.000Z",
+      message: { role: "toolResult", content: [{ type: "text", text: "late-child-evidence result" }] } },
+    hidden("child-hidden", "child-r"),
+  ]);
+  const ctx = context(root, current);
+  const found = JSON.parse(resultText(await executeSessionHistory({
+    action: "search", query: "late-child-evidence", include: ["assistant", "tool_result"],
+  }, ctx)));
+  assert.deepEqual(found.matches.map((match: { entryId: string }) => match.entryId), ["child-a", "child-r"]);
+  const resource = createResourceTool();
+  for (const match of found.matches) {
+    const read = await resource.execute("exact-child", { uri: match.resourceUri, offset: 1, limit: 10 }, new AbortController().signal, undefined, ctx);
+    assert.match(resultText(read), /late-child-evidence/);
+    assert.doesNotMatch(resultText(read), /must stay hidden|secret-path|do not expose|unrelated workspace/);
+  }
+  await assert.rejects(() => resource.execute("hidden-child", {
+    uri: sessionEntryUri(childId, "child-hidden"),
+  }, new AbortController().signal, undefined, ctx), /not found or not visible/);
+});
+
+test("exact teammate turn reads prioritize the discovered session across worker directories", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-teammate-exact-turn-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  await writeTranscript(current, [header("current-session"), user("root-u", null, "request")]);
+  const earlier = join(root, "current", "a-worker");
+  const later = join(root, "current", "z-worker");
+  await mkdir(earlier, { recursive: true });
+  await mkdir(later, { recursive: true });
+  await Promise.all(Array.from({ length: MAX_SESSION_HISTORY_FILES }, (_, index) => writeTranscript(
+    join(earlier, `archive-${index}.jsonl`),
+    [header(`archive-${index}`), user(`archive-u-${index}`, null, "unrelated teammate")],
+  )));
+  const childId = "requested-child";
+  await writeTranscript(join(later, `2026-10-12_${childId}.jsonl`), [
+    header(childId), user("child-u", null, "late requested evidence"),
+    assistant("child-a", "child-u", "verified child answer"), hidden("child-hidden", "child-a"),
+  ]);
+  const ctx = context(root, current);
+  const found = JSON.parse(resultText(await executeSessionHistory({
+    action: "search", scope: "teammates", query: "late requested evidence", scanOffset: MAX_SESSION_HISTORY_FILES,
+  }, ctx)));
+  assert.equal(found.matches[0].sessionId, childId);
+  const read = JSON.parse(resultText(await executeSessionHistory({
+    action: "read_turn", scope: "teammates", sessionId: childId, turn: found.matches[0].turn,
+  }, ctx)));
+  assert.equal(read.found, true);
+  assert.equal(read.filesRead, MAX_SESSION_HISTORY_FILES);
+  assert.deepEqual(read.turn.entries.map((entry: { entryId: string }) => entry.entryId), ["child-u", "child-a"]);
+  assert.doesNotMatch(JSON.stringify(read), /must stay hidden|secret-path|do not expose/);
+  const resource = await createResourceTool().execute("late-child", {
+    uri: found.matches[0].resourceUri,
+  }, new AbortController().signal, undefined, ctx);
+  assert.match(resultText(resource), /late requested evidence/);
+});
+
+test("custom inventories retain authorization without inventing teammate provenance", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-custom-inventory-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  const other = join(root, "other.jsonl");
+  const childDirectory = join(root, "current", "worker");
+  await mkdir(childDirectory, { recursive: true });
+  await writeTranscript(current, [header("current-session"), user("root-u", null, "needle")]);
+  await writeTranscript(other, [header("other-session"), user("other-u", null, "needle")]);
+  await writeTranscript(join(childDirectory, "child.jsonl"), [header("child-session"), user("child-u", null, "needle")]);
+  const inventory = [{ path: current }, { path: other }];
+  for (const options of [{ inventory }, { inventoryFactory: () => inventory }]) {
+    const result = await executeSessionHistory({ action: "search", query: "needle" }, context(root, current), options);
+    assert.notEqual(result.isError, true);
+    const payload = JSON.parse(resultText(result));
+    assert.deepEqual(payload.matches.map((match: { sessionId: string }) => match.sessionId), ["current-session", "other-session"]);
+    assert.equal(payload.filesRead, 2);
+    for (const match of payload.matches) {
+      assert.equal("source" in match, false);
+      assert.equal("parentSessionId" in match, false);
+    }
+  }
+});
+
+test("associated teammate search shares file and match pagination with the current session", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-associated-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current.jsonl");
+  await writeTranscript(current, [header("current-session"), user("root-u", null, "needle")]);
+  for (const name of ["a", "b"]) {
+    const directory = join(root, "current", name);
+    await mkdir(directory, { recursive: true });
+    await Promise.all(Array.from({ length: 55 }, (_, index) => writeTranscript(
+      join(directory, `${String(index).padStart(3, "0")}.jsonl`),
+      [header(`${name}-${index}`), user("u", null, "needle")],
+    )));
+  }
+  const ctx = context(root, current);
+  const request = { action: "search", query: "needle", limit: 20 };
+  const first = JSON.parse(resultText(await executeSessionHistory(request, ctx)));
+  assert.equal(first.filesRead, MAX_SESSION_HISTORY_FILES);
+  assert.equal(first.matchCount, MAX_SESSION_HISTORY_FILES);
+  assert.deepEqual(first.scan, { offset: 0, hasMore: true, nextOffset: 100 });
+  assert.equal(first.matches[0].source, "current_session");
+  const seen: string[] = first.matches.map((match: { sessionId: string }) => match.sessionId);
+  for (const offset of [20, 40, 60, 80]) {
+    const page = JSON.parse(resultText(await executeSessionHistory({ ...request, offset }, ctx)));
+    assert.equal(page.matchCount, 100);
+    seen.push(...page.matches.map((match: { sessionId: string }) => match.sessionId));
+  }
+  const last = JSON.parse(resultText(await executeSessionHistory({ ...request, scanOffset: first.scan.nextOffset }, ctx)));
+  assert.equal(last.filesRead, 11);
+  assert.equal(last.matchCount, 11);
+  assert.equal(last.scan.offset, 100);
+  assert.equal(last.scan.hasMore, false);
+  assert.equal(last.coverage, "partial");
+  assert.equal(last.matchCountRelation, "lower_bound");
+  assert.ok(last.matches.every((match: { source: string; parentSessionId: string }) =>
+    match.source === "teammates" && match.parentSessionId === "current-session"));
+  seen.push(...last.matches.map((match: { sessionId: string }) => match.sessionId));
+  assert.equal(seen.length, 111);
+  assert.equal(new Set(seen).size, 111);
+});
+
 test("session_history current_session reads only the active session and exposes checkpoint recovery", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-recovery-"));
   try {
@@ -300,6 +492,108 @@ test("session_history current_session reads only the active session and exposes 
   }
 });
 
+test("checkpoint IDs use safe structured metadata and exact lookup beyond substring pages", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-checkpoint-identity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "current.jsonl");
+  const target = "f7d1fe8c-3162-4e3d-9198-5660620a4f32";
+  const rows: unknown[] = [header("current-session"), user("u", null, "request")];
+  let parent = "u";
+  for (let index = 0; index < 25; index++) {
+    const id = `decoy-${index}`;
+    rows.push(compaction(id, parent, `<recovery_capsule version="2">\n- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.\n- Checkpoint ID: decoy-id-${index}\n- Previous Checkpoint: ${target}\n</recovery_capsule>`));
+    parent = id;
+  }
+  rows.push({ ...(compaction("real-entry", parent, "summary without identity") as object), details: {
+    kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId: target, previousCheckpointId: "old-id",
+    projectRoot: root, knowhowPath: "/secret-path", todo: { state: "must stay hidden" },
+  } });
+  rows.push({ ...(compaction("reset-entry", "real-entry", "- Checkpoint ID: summary-spoof") as object), details: {
+    kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId: "reset-id",
+    newContext: { source: "command", carryForward: "must stay hidden" },
+  } });
+  rows.push(compaction("native-entry", "reset-entry", "native summary"));
+  rows.push(compaction("unmarked", "native-entry", "- Checkpoint ID:\t unmarked-id  \r\n"));
+  await writeTranscript(file, rows);
+  const ctx = context(root, file);
+  const timeline = JSON.parse(resultText(await executeSessionHistory({ action: "timeline" }, ctx)));
+  const real = timeline.checkpoints.find((entry: { entryId: string }) => entry.entryId === "real-entry");
+  assert.equal(real.checkpointId, target);
+  assert.equal(real.previousCheckpointId, "old-id");
+  assert.equal(real.source, "compaction");
+  assert.equal(real.summary, `Checkpoint ${target}`);
+  assert.equal(timeline.checkpoints.find((entry: { entryId: string }) => entry.entryId === "reset-entry").source, "new-context");
+  assert.doesNotMatch(JSON.stringify(timeline), /secret-path|must stay hidden|projectRoot|knowhowPath|details/);
+  for (const checkpointId of [target, "real-entry", "reset-id", "native-entry", "decoy-id-0", "unmarked-id"]) {
+    const read = JSON.parse(resultText(await executeSessionHistory({ action: "read_checkpoint", checkpointId }, ctx)));
+    assert.equal(read.found, true, checkpointId);
+    assert.equal(read.filesRead, 1);
+    assert.doesNotMatch(JSON.stringify(read), /secret-path|must stay hidden|projectRoot|knowhowPath|details/);
+    if (checkpointId === target) assert.equal(read.selectedEntryId, "real-entry");
+  }
+  for (const checkpointId of ["old-id", "summary-spoof"]) {
+    const read = JSON.parse(resultText(await executeSessionHistory({ action: "read_checkpoint", checkpointId }, ctx)));
+    assert.equal(read.found, false, checkpointId);
+    assert.equal(read.truncated, false);
+    assert.deepEqual(read.omissionCounts, {});
+  }
+  const other = join(root, "other.jsonl");
+  await writeTranscript(other, [header("other-session"), user("u", null, "other"), {
+    ...(compaction("foreign-entry", "u", "foreign") as object),
+    details: { kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId: "foreign-id" },
+  }]);
+  const read = JSON.parse(resultText(await executeSessionHistory({ action: "read_checkpoint", checkpointId: "foreign-id" }, ctx, { inventory: [{ path: file }, { path: other }] })));
+  assert.equal(read.found, false, "exact lookup remains bound to the host current session");
+});
+
+test("timeline and read_turn paginate bounded entries without changing defaults or visibility", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-entry-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "current.jsonl");
+  const rows: unknown[] = [header("current-session"), user("u", null, "request")];
+  let parent = "u";
+  for (let index = 0; index < 24; index++) {
+    rows.push(assistant(`a-${index}`, parent, `answer ${index}`));
+    parent = `a-${index}`;
+  }
+  for (let index = 0; index < 25; index++) {
+    rows.push(compaction(`cp-${String(index).padStart(2, "0")}`, parent, `summary ${index}`));
+    parent = `cp-${String(index).padStart(2, "0")}`;
+  }
+  await writeTranscript(file, rows);
+  const ctx = context(root, file);
+  for (const action of ["timeline", "read_turn"]) {
+    const params = { action, ...(action === "read_turn" ? { turn: 1, include: ["user", "assistant"] } : {}) };
+    const first = JSON.parse(resultText(await executeSessionHistory(params, ctx)));
+    assert.deepEqual(first, JSON.parse(resultText(await executeSessionHistory({ ...params, offset: 0 }, ctx))));
+    assert.equal(first.hasMore, true);
+    assert.equal(first.nextOffset, 20);
+    assert.equal(first.truncated, true);
+    assert.equal(first.omissionCounts["result-limit"], 5);
+    const next = JSON.parse(resultText(await executeSessionHistory({ ...params, offset: first.nextOffset }, ctx)));
+    assert.equal(next.hasMore, false);
+    assert.equal("nextOffset" in next, false);
+    assert.equal(next.truncated, false);
+    assert.deepEqual(next.omissionCounts, {});
+    const entries = action === "timeline" ? next.checkpoints : next.turn.entries;
+    assert.equal(entries.length, 5);
+    if (action === "timeline") assert.equal(next.checkpointCount, 25);
+    else {
+      assert.equal(next.found, true);
+      assert.equal(next.turn.rowCount, 5);
+      assert.equal(next.turn.entries[0].entryId, "a-19");
+      assert.ok(next.turn.entries.every((entry: { kind: string }) => entry.kind === "assistant"));
+    }
+    const past = JSON.parse(resultText(await executeSessionHistory({ ...params, offset: Number.MAX_SAFE_INTEGER }, ctx)));
+    assert.equal(past.hasMore, false);
+    assert.equal(past.truncated, false);
+    assert.deepEqual(action === "timeline" ? past.checkpoints : past.turn.entries, []);
+    for (const extra of [{ offset: -1 }, { offset: 0.5 }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { offset: null }, { limit: 21 }]) {
+      assert.equal((await executeSessionHistory({ ...params, ...extra }, ctx)).isError, true);
+    }
+  }
+});
+
 test("session resources revalidate active-chain visibility and reject arbitrary paths", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-resource-"));
   try {
@@ -342,7 +636,7 @@ test("session resources revalidate active-chain visibility and reject arbitrary 
   }
 });
 
-test("session_history checkpoint recovery fails closed when new context is disabled", async () => {
+test("session_history preserves an explicit host policy blocking checkpoint reads", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-recovery-disabled-"));
   try {
     const currentFile = join(root, "session.jsonl");
@@ -364,10 +658,41 @@ test("session_history checkpoint recovery fails closed when new context is disab
     ) => Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>;
     const result = await call("disabled", { action: "timeline" }, new AbortController().signal, undefined, context(root, currentFile));
     assert.equal(result.isError, true);
-    assert.match(resultText(result), /newContext\.enabled is false/);
+    assert.match(resultText(result), /host history policy/);
     assert.equal(inventoryRead, false, "disabled calls must not open the session file");
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint reads remain available when deterministic new-context reset is disabled", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-history-reset-disabled-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, ".pi"));
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ compaction: { newContext: { enabled: false } } }));
+  const file = join(root, "current.jsonl");
+  await writeTranscript(file, [
+    header("current-session"), user("u", null, "Original accepted scope"),
+    { ...(compaction("ordinary-entry", "u", "Ordinary summary without ID labels") as object), details: {
+      kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId: "ordinary-id",
+    } },
+    { ...(compaction("reset-entry", "ordinary-entry", "Recovery capsule") as object), details: {
+      kind: "maestro-session-checkpoint", schemaVersion: 4, checkpointId: "reset-id", newContext: { source: "tool" },
+    } },
+  ]);
+  const ctx = context(root, file);
+  const timeline = await executeSessionHistory({ action: "timeline" }, ctx);
+  assert.notEqual(timeline.isError, true);
+  assert.equal(JSON.parse(resultText(timeline)).checkpointCount, 2);
+  for (const checkpointId of ["ordinary-id", "reset-id"]) {
+    const result = await executeSessionHistory({ action: "read_checkpoint", checkpointId }, ctx);
+    assert.notEqual(result.isError, true);
+    const read = JSON.parse(resultText(result));
+    assert.equal(read.found, true);
+    const resource = await resolveResource(read.selectedEntry.resourceUri, root, undefined, {
+      sessionHistory: createCompactHistoryInventoryProvider(ctx),
+    });
+    assert.match(resource.content, checkpointId === "ordinary-id" ? /Ordinary summary without ID labels/ : /Recovery capsule/);
   }
 });
 
@@ -508,7 +833,7 @@ test("session history registration exposes unified recovery and historical disco
   assert.deepEqual(schema.properties?.action?.enum, ["list_sessions", "search", "read_turn", "timeline", "read_checkpoint"]);
   assert.deepEqual(schema.properties?.scope?.enum, ["current_session", "workspace_sessions", "teammates"]);
   assert.deepEqual(schema.properties?.include?.items?.enum, ["user", "assistant", "visible_custom", "compaction", "tool_result"]);
-  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "mode", "sort", "offset", "scanOffset", "sessionId", "turn", "checkpointId", "include", "limit"]);
+  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "includeTeammates", "query", "mode", "sort", "offset", "scanOffset", "sessionId", "turn", "checkpointId", "include", "limit"]);
   assert.deepEqual(schema.properties?.mode?.enum, ["literal", "terms"]);
   assert.deepEqual(schema.properties?.sort?.enum, ["source", "relevance"]);
   assert.equal(schema.additionalProperties, false);
@@ -525,6 +850,9 @@ test("session history registration exposes unified recovery and historical disco
   assert.match(guidance, /not authoritative knowledge/);
   assert.doesNotMatch(`${tool.description}\n${guidance}`, /compact_history/);
   assert.doesNotMatch(JSON.stringify(schema), /delete|update|write|maxFiles|maxMatches|includeToolResults/i);
+  assert.match(tool.description, /associated teammate transcripts by default/);
+  assert.match(tool.description, /includeTeammates=false/);
+  assert.match(tool.description, /read_turn and checkpoint recovery remain current-transcript-only/);
   assert.match(tool.description, /NFKC/);
   assert.match(tool.description, /not a frozen snapshot/);
 });
@@ -572,7 +900,8 @@ test("tool rejects search-only misuse and invalid search settings before accessi
   const options = { inventory: () => { reads += 1; return []; } };
   const ctx = { cwd: process.cwd(), sessionManager: {} } as unknown as ExtensionContext;
   for (const action of ["list_sessions", "read_turn", "timeline", "read_checkpoint"]) {
-    for (const extra of [{ offset: 0 }, { scanOffset: 0 }, { mode: "literal" }, { sort: "source" }]) {
+    for (const extra of [{ offset: 0 }, { scanOffset: 0 }, { mode: "literal" }, { sort: "source" }, { includeTeammates: true }, { includeTeammates: false }]) {
+      if ("offset" in extra && (action === "timeline" || action === "read_turn")) continue;
       const result = await executeSessionHistory({ action, turn: 1, checkpointId: "checkpoint", ...extra }, ctx, options);
       assert.equal((result as { isError?: boolean }).isError, true);
       assert.match(resultText(result), /only for search/);
@@ -581,6 +910,16 @@ test("tool rejects search-only misuse and invalid search settings before accessi
   for (const extra of [{ offset: -1 }, { offset: 0.5 }, { offset: "0" }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { scanOffset: -1 }, { scanOffset: 0.5 }, { scanOffset: "0" }, { scanOffset: Number.MAX_SAFE_INTEGER + 1 }, { mode: "regex" }, { sort: "date" }, { mode: "terms", query: " \n\u3000" }]) {
     const result = await executeSessionHistory({ action: "search", query: "needle", ...extra }, ctx, options);
     assert.equal((result as { isError?: boolean }).isError, true);
+  }
+  for (const includeTeammates of [null, "true", 1]) {
+    const result = await executeSessionHistory({ action: "search", query: "needle", includeTeammates }, ctx, options);
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /must be a boolean/);
+  }
+  for (const scope of ["workspace_sessions", "teammates"]) {
+    const result = await executeSessionHistory({ action: "search", scope, query: "needle", includeTeammates: true }, ctx, options);
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /only for search with scope=current_session/);
   }
   assert.equal(reads, 0);
   const literalSpaces = await executeSessionHistory({ action: "search", query: " \n" }, ctx, options);

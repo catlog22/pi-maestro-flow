@@ -114,8 +114,21 @@ export interface SessionHistorySearchOptions extends SessionHistoryOptions {
   /** Zero-based unique candidate offset; independent of match pagination. */
   scanOffset?: number;
 }
-export type SessionHistoryReadOptions = SessionHistoryOptions;
-export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
+export interface SessionHistoryReadOptions extends SessionHistoryOptions {
+  /** Zero-based projected entry offset within the selected turn or entry. */
+  offset?: number;
+}
+export interface SessionHistoryCompactionOptions extends Omit<SessionHistoryOptions, "include"> {
+  /** Zero-based checkpoint offset in the newest-first timeline. */
+  offset?: number;
+}
+
+/** Minimal allowlisted identity, never the persisted recovery state. */
+export interface SessionHistoryCheckpoint {
+  checkpointId: string;
+  previousCheckpointId?: string;
+  source: "compaction" | "new-context";
+}
 
 export interface SessionHistorySession {
   sessionId: string;
@@ -138,6 +151,8 @@ export interface SessionHistoryEntry {
   kind: SessionHistoryInclude;
   text: string;
   timestamp: number;
+  /** Present only for recognized Maestro compaction details. */
+  checkpoint?: SessionHistoryCheckpoint;
 }
 
 export interface SessionHistoryTurn {
@@ -192,6 +207,8 @@ export interface SessionHistoryCompactionResult extends ScanMetrics {
   generation?: number;
   checkpoints: readonly SessionHistoryEntry[];
   checkpointCount: number;
+  hasMore: boolean;
+  nextOffset?: number;
 }
 export interface SessionHistoryEntryRead {
   sessionId: string;
@@ -205,6 +222,8 @@ export interface SessionHistoryReadResult extends ScanMetrics {
   generation?: number;
   sessionId: string;
   found: boolean;
+  hasMore: boolean;
+  nextOffset?: number;
   selectedTurn?: number;
   selectedEntryId?: string;
   turn?: SessionHistoryTurn;
@@ -213,6 +232,8 @@ export interface SessionHistoryReadResult extends ScanMetrics {
 export interface SessionHistoryReadRequest extends SessionHistoryReadOptions {
   sessionId: string;
   entryId?: string;
+  /** Exact checkpoint identity or compaction entry id; never a text search. */
+  checkpointId?: string;
   turn?: number;
 }
 
@@ -358,20 +379,24 @@ export class SessionHistoryService {
   }
 
   async compactions(options: SessionHistoryCompactionOptions = {}): Promise<SessionHistoryCompactionResult> {
-    rejectSearchOptions(options);
+    rejectSearchOptions(options, true);
+    const offset = boundedOffset(options.offset);
     const limit = boundedLimit(options.limit);
     const scan = await this.#scan(new Set<SessionHistoryInclude>(["compaction"]), options.signal);
     const all = scan.sessions
       .flatMap((session) => session.entries)
       .filter((entry) => entry.kind === "compaction")
       .sort((left, right) => right.timestamp - left.timestamp || right.entryId.localeCompare(left.entryId));
-    const checkpoints = all.slice(0, limit);
+    const checkpoints = all.slice(offset, offset + limit);
+    const remaining = Math.max(0, all.length - offset - checkpoints.length);
     return resultWithMetrics(scan, {
       version: SESSION_HISTORY_VERSION,
       ...(scan.generation === undefined ? {} : { generation: scan.generation }),
       checkpoints: Object.freeze(checkpoints),
       checkpointCount: all.length,
-    }, all.length - checkpoints.length);
+      hasMore: remaining > 0,
+      ...(remaining > 0 ? { nextOffset: offset + checkpoints.length } : {}),
+    }, remaining);
   }
 
   async listCompactions(options: SessionHistoryCompactionOptions = {}): Promise<SessionHistoryCompactionResult> {
@@ -385,35 +410,49 @@ export class SessionHistoryService {
     options: SessionHistoryReadOptions = {},
   ): Promise<SessionHistoryReadResult> {
     const request = typeof sessionOrRequest === "string" ? { sessionId: sessionOrRequest, ...options } : sessionOrRequest;
-    rejectSearchOptions(request);
+    rejectSearchOptions(request, true);
+    const offset = boundedOffset(request.offset);
     validateIdentifierInput(request.sessionId, "sessionId");
     if (request.entryId !== undefined) validateIdentifierInput(request.entryId, "entryId");
+    if (request.checkpointId !== undefined) {
+      validateIdentifierInput(request.checkpointId, "checkpointId");
+      if (request.entryId !== undefined || request.turn !== undefined) {
+        throw new TypeError("checkpointId cannot be combined with entryId or turn.");
+      }
+    }
     if (request.turn !== undefined && (!Number.isSafeInteger(request.turn) || request.turn < 0)) {
       throw new TypeError("turn must be a non-negative integer.");
     }
-    const include = normalizedInclude(request.include);
+    const include = request.checkpointId === undefined ? normalizedInclude(request.include) : new Set<SessionHistoryInclude>(["compaction"]);
     const limit = boundedLimit(request.limit);
     const scan = await this.#scan(include, request.signal);
     const loaded = scan.sessions.find((item) => item.summary.sessionId === request.sessionId);
     const selected = loaded && request.turn !== undefined
       ? loaded.turns.find((item) => item.turn === request.turn)
       : undefined;
-    const selectedEntry = loaded && request.entryId !== undefined
-      ? makeEntryRead(loaded, request.entryId, limit)
-      : undefined;
-    const turn = selected ? boundedTurn(selected, limit) : undefined;
-    const found = Boolean(loaded && (request.entryId !== undefined
-      ? selectedEntry
-      : request.turn !== undefined ? turn : true));
-    const omitted = selected && turn ? selected.entries.length - turn.entries.length : 0;
+    const entryId = request.checkpointId === undefined ? request.entryId : loaded?.entries.find(
+      (entry) => entry.entryId === request.checkpointId,
+    )?.entryId ?? loaded?.entries.find(
+      (entry) => sessionHistoryCheckpoint(entry)?.checkpointId === request.checkpointId,
+    )?.entryId;
+    const entryRows = loaded && entryId !== undefined ? loaded.entries.filter((entry) => entry.entryId === entryId) : [];
+    const selectedEntry = entryRows.length > 0 ? makeEntryRead(entryRows, offset, limit) : undefined;
+    const turn = selected ? boundedTurn(selected, limit, offset) : undefined;
+    const entrySelection = request.entryId !== undefined || request.checkpointId !== undefined;
+    const found = Boolean(loaded && (entrySelection ? selectedEntry : request.turn !== undefined ? turn : true));
+    const total = entrySelection ? entryRows.length : selected?.entries.length ?? 0;
+    const returned = entrySelection ? selectedEntry?.entries.length ?? 0 : turn?.entries.length ?? 0;
+    const omitted = Math.max(0, total - offset - returned);
     return resultWithMetrics(scan, {
       version: SESSION_HISTORY_VERSION,
       ...(scan.generation === undefined ? {} : { generation: scan.generation }),
       sessionId: request.sessionId,
       found,
+      hasMore: omitted > 0,
+      ...(omitted > 0 ? { nextOffset: offset + returned } : {}),
       ...(request.turn === undefined ? {} : { selectedTurn: request.turn, ...(turn ? { turn } : {}) }),
-      ...(request.entryId === undefined ? {} : {
-        selectedEntryId: request.entryId,
+      ...(entryId === undefined ? {} : {
+        selectedEntryId: entryId,
         ...(selectedEntry ? { selectedEntry } : {}),
       }),
     }, omitted);
@@ -742,7 +781,9 @@ function projectChain(sessionId: string, chain: readonly RawEntry[], include: Re
       if (projected.omit) continue;
       pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "visible_custom", text: contentText(projected.content), timestamp });
     } else if (entry.type === "compaction") {
-      pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "compaction", text: typeof entry.summary === "string" ? entry.summary : "", timestamp });
+      const checkpoint = projectCheckpointDetails(entry.details);
+      pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "compaction", text: typeof entry.summary === "string" ? entry.summary : "", timestamp,
+        ...(checkpoint ? { checkpoint } : {}) });
     }
     // branch/model/thinking-level and other state metadata are excluded.
   }
@@ -750,6 +791,39 @@ function projectChain(sessionId: string, chain: readonly RawEntry[], include: Re
     turnSeeds.unshift({ turn: 0, startedAt: entries.find((entry) => entry.turn === 0)?.timestamp ?? 0, userText: "session start" });
   }
   return { entries, turnSeeds, ...(firstUser === undefined ? {} : { firstUser }) };
+}
+
+function safeCheckpointId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(value);
+}
+
+function projectCheckpointDetails(value: unknown): SessionHistoryCheckpoint | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const details = value as Record<string, unknown>;
+  if (details.kind !== "maestro-session-checkpoint" || ![1, 2, 3, 4].includes(details.schemaVersion as number)
+    || !safeCheckpointId(details.checkpointId)) return undefined;
+  const context = details.newContext;
+  const producer = context && typeof context === "object" && !Array.isArray(context)
+    ? (context as Record<string, unknown>).source : undefined;
+  const newContext = producer === "todo-transition" || producer === "plan-confirm" || producer === "tool" || producer === "command";
+  return {
+    checkpointId: details.checkpointId,
+    ...(safeCheckpointId(details.previousCheckpointId) ? { previousCheckpointId: details.previousCheckpointId } : {}),
+    source: newContext ? "new-context" : "compaction",
+  };
+}
+
+/** Structured identity wins; exact summary labels retain legacy lookup support. */
+export function sessionHistoryCheckpoint(entry: SessionHistoryEntry): SessionHistoryCheckpoint | undefined {
+  if (entry.kind !== "compaction") return undefined;
+  if (entry.checkpoint) return entry.checkpoint;
+  const checkpointId = /^- Checkpoint ID:([^\r\n]*)\r?$/m.exec(entry.text)?.[1]?.trim();
+  if (!safeCheckpointId(checkpointId)) return undefined;
+  const previousCheckpointId = /^- Previous Checkpoint:([^\r\n]*)\r?$/m.exec(entry.text)?.[1]?.trim();
+  const newContext = /^<recovery_capsule version="[12]">\r?\n/.test(entry.text)
+    && /^- Capsule: Maestro New Context Recovery Capsule v[12]; no model summary was generated\.\r?$/m.test(entry.text);
+  return { checkpointId, source: newContext ? "new-context" : "compaction",
+    ...(safeCheckpointId(previousCheckpointId) ? { previousCheckpointId } : {}) };
 }
 
 function pushEntry(
@@ -786,15 +860,14 @@ function makeTurns(
   });
 }
 
-function boundedTurn(turn: SessionHistoryTurn, limit: number): SessionHistoryTurn {
-  const entries = Object.freeze(turn.entries.slice(0, limit));
+function boundedTurn(turn: SessionHistoryTurn, limit: number, offset: number): SessionHistoryTurn {
+  const entries = Object.freeze(turn.entries.slice(offset, offset + limit));
   return { ...turn, rowCount: entries.length, textLength: entries.reduce((sum, entry) => sum + entry.text.length, 0), entries };
 }
-function makeEntryRead(loaded: LoadedSession, entryId: string, limit: number): SessionHistoryEntryRead | undefined {
-  const entries = loaded.entries.filter((entry) => entry.entryId === entryId).slice(0, limit);
-  if (entries.length === 0) return undefined;
-  return { sessionId: loaded.summary.sessionId, entryId, turn: entries[0]!.turn,
-    resourceUri: sessionEntryUri(loaded.summary.sessionId, entryId), entries: Object.freeze(entries) };
+function makeEntryRead(rows: readonly SessionHistoryEntry[], offset: number, limit: number): SessionHistoryEntryRead {
+  const first = rows[0]!;
+  return { sessionId: first.sessionId, entryId: first.entryId, turn: first.turn,
+    resourceUri: first.resourceUri, entries: Object.freeze(rows.slice(offset, offset + limit)) };
 }
 
 function resultWithMetrics<T extends object>(scan: ScanResult, value: T, omitted: number): T & ScanMetrics {
@@ -858,8 +931,13 @@ function boundedLimit(value: number | undefined): number {
   }
   return value;
 }
-function rejectSearchOptions(options: SessionHistoryOptions): void {
-  for (const key of ["mode", "sort", "offset", "scanOffset"] as const) {
+function boundedOffset(value: number | undefined): number {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("offset must be a non-negative safe integer.");
+  return value;
+}
+function rejectSearchOptions(options: SessionHistoryOptions, allowOffset = false): void {
+  for (const key of (allowOffset ? ["mode", "sort", "scanOffset"] : ["mode", "sort", "offset", "scanOffset"])) {
     if (key in options) throw new TypeError(`${key} is available only for search.`);
   }
 }
