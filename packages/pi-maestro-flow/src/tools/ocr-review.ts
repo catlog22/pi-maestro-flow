@@ -93,7 +93,8 @@ export function encodeExtraHeaders(headers: Record<string, string | null>): stri
   // Pi uses null to remove a configured header, so it must not reach the CLI.
   return Object.entries(headers)
     .flatMap(([key, value]) => {
-      if (value === null) return [];
+      // OCR reserves User-Agent and supplies its own SDK value.
+      if (value === null || key.toLowerCase() === "user-agent") return [];
       const safe = /[",\n]/.test(value) ? `"${value.replace(/"/g, "")}"` : value;
       return [`${key}=${safe}`];
     })
@@ -194,8 +195,8 @@ export function scopeArgs(params: OcrReviewInput): string[] {
   if (params.commit && hasRange) {
     throw new OcrError("Use either 'commit' or 'from'/'to', not both.");
   }
-  if (params.resume && (params.commit || hasRange)) {
-    throw new OcrError("'resume' cannot be combined with 'commit' or 'from'/'to'.");
+  if (params.resume && !params.commit && !hasRange) {
+    throw new OcrError("'resume' requires the original 'commit' or 'from'/'to' target; workspace reviews cannot be resumed.");
   }
   const args: string[] = [];
   if (params.commit) args.push("--commit", params.commit);

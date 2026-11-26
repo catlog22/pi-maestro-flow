@@ -53,14 +53,20 @@ test("ocr-review scopeArgs maps flags and rejects conflicts", () => {
   assert.deepEqual(scopeArgs({ exclude: "a,b" }), ["--exclude", "a,b"]);
   assert.throws(() => scopeArgs({ from: "main" }), /from.*to/);
   assert.throws(() => scopeArgs({ commit: "x", from: "a", to: "b" }), /either/i);
-  assert.throws(() => scopeArgs({ resume: "s1", commit: "x" }), /resume/i);
+  assert.throws(() => scopeArgs({ resume: "s1" }), /requires the original.*commit.*from.*to/i);
+  assert.deepEqual(scopeArgs({ resume: "s1", commit: "x" }), ["--commit", "x"]);
+  assert.deepEqual(scopeArgs({ resume: "s1", from: "main", to: "feat" }), [
+    "--from", "main", "--to", "feat",
+  ]);
 });
 
-test("open-code-review encodeExtraHeaders quotes comma values", () => {
+test("open-code-review encodeExtraHeaders quotes values and omits reserved User-Agent", () => {
   assert.equal(encodeExtraHeaders({}), "");
   assert.equal(encodeExtraHeaders({ "X-A": "1", "X-B": "v2" }), "X-A=1,X-B=v2");
   assert.equal(encodeExtraHeaders({ "X-C": "a,b" }), 'X-C="a,b"');
   assert.equal(encodeExtraHeaders({ "X-Keep": "yes", "X-Removed": null }), "X-Keep=yes");
+  assert.equal(encodeExtraHeaders({ "User-Agent": "custom/1.0", "X-Keep": "yes" }), "X-Keep=yes");
+  assert.equal(encodeExtraHeaders({ "user-agent": "custom/1.0" }), "");
 });
 
 test("open-code-review inherits runtime-resolved API manager gateway auth", async () => {
